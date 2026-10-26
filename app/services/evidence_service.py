@@ -4,9 +4,9 @@ import json
 import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
-from backend.app.extensions import db
-from backend.app.models.investigation import CaseEvidence
-from backend.app.models.source_domain import User, Order, Payment, Chargeback
+from app.extensions import db
+from app.models.investigation import CaseEvidence
+from app.models.source_domain import User, Order, Payment, Chargeback
 
 logger = logging.getLogger("fraud_agent.evidence_service")
 

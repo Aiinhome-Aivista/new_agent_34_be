@@ -1,14 +1,14 @@
 import logging
 from flask import Blueprint, request, jsonify
 from pydantic import ValidationError
-from backend.app.schemas.trigger import TriggerRequest, TriggerResponse
-from backend.app.schemas.decision import ReviewDecisionRequest
-from backend.app.services.case_service import CaseService
-from backend.app.services.audit_service import AuditService
-from backend.app.services.action_service import ActionService
-from backend.app.models import InvestigationCase, ReviewDecision
-from backend.app.agent.graph import execute_case_investigation
-from backend.app.extensions import db
+from app.schemas.trigger import TriggerRequest, TriggerResponse
+from app.schemas.decision import ReviewDecisionRequest
+from app.services.case_service import CaseService
+from app.services.audit_service import AuditService
+from app.services.action_service import ActionService
+from app.models import InvestigationCase, ReviewDecision
+from app.agent.graph import execute_case_investigation
+from app.extensions import db
 
 logger = logging.getLogger("fraud_agent.api.investigations")
 investigations_bp = Blueprint("investigations", __name__)

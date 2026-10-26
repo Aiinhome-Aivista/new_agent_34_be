@@ -1,8 +1,8 @@
 import logging
 from sqlalchemy import func
-from backend.app.extensions import db
-from backend.app.models.investigation import InvestigationCase
-from backend.app.models.governance import ActionRequest, AuditEvent
+from app.extensions import db
+from app.models.investigation import InvestigationCase
+from app.models.governance import ActionRequest, AuditEvent
 
 logger = logging.getLogger("fraud_agent.dashboard_service")
 

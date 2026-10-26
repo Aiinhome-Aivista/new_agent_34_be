@@ -1,5 +1,5 @@
 from flask import Blueprint, jsonify, request
-from backend.app.models.governance import AuditEvent
+from app.models.governance import AuditEvent
 
 audit_bp = Blueprint("audit", __name__)
 

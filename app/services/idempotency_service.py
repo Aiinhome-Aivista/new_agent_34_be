@@ -2,7 +2,7 @@ import time
 import logging
 from threading import Lock
 from typing import Optional
-from backend.app.extensions import redis_client
+from app.extensions import redis_client
 
 logger = logging.getLogger("fraud_agent.idempotency")
 

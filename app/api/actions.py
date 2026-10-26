@@ -1,7 +1,7 @@
 from flask import Blueprint, jsonify, request
-from backend.app.models.governance import ActionRequest, AuditEvent, IntegrationConfig
-from backend.app.services.rag_service import PolicyRAGService
-from backend.app.extensions import db
+from app.models.governance import ActionRequest, AuditEvent, IntegrationConfig
+from app.services.rag_service import PolicyRAGService
+from app.extensions import db
 
 actions_bp = Blueprint("actions", __name__)
 audit_bp = Blueprint("audit", __name__)

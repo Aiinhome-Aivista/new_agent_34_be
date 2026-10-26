@@ -1,6 +1,6 @@
 import logging
 from typing import Dict, Any, List
-from backend.app.schemas.recommendation import StructuredRecommendation
+from app.schemas.recommendation import StructuredRecommendation
 
 logger = logging.getLogger("fraud_agent.decision_gateway")
 

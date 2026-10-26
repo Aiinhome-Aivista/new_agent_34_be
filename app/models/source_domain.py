@@ -4,7 +4,7 @@ from sqlalchemy import (
     ForeignKey, UniqueConstraint, Index
 )
 from sqlalchemy.orm import relationship
-from backend.app.extensions import db
+from app.extensions import db
 
 def utc_now():
     return datetime.now(timezone.utc)

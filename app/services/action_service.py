@@ -2,10 +2,10 @@ import uuid
 import logging
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
-from backend.app.extensions import db
-from backend.app.models.investigation import InvestigationCase
-from backend.app.models.governance import ActionRequest
-from backend.app.services.audit_service import AuditService
+from app.extensions import db
+from app.models.investigation import InvestigationCase
+from app.models.governance import ActionRequest
+from app.services.audit_service import AuditService
 
 logger = logging.getLogger("fraud_agent.action_service")
 

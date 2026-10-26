@@ -1,8 +1,8 @@
 from flask import Blueprint, jsonify
 from sqlalchemy import text
-from backend.app.extensions import db, redis_client
-from backend.app.services.rag_service import PolicyRAGService
-from backend.app.services.graph_service import GraphEntityService
+from app.extensions import db, redis_client
+from app.services.rag_service import PolicyRAGService
+from app.services.graph_service import GraphEntityService
 
 health_bp = Blueprint("health", __name__)
 
@@ -64,7 +64,7 @@ def readiness():
 
     # 5. LLM Provider Check
     try:
-        from backend.app.services.llm_provider import LLMProviderFactory
+        from app.services.llm_provider import LLMProviderFactory
         provider = LLMProviderFactory.get_provider()
         readiness_details["llm_provider"] = {
             "provider": provider.provider_name,

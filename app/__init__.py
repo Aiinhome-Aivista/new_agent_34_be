@@ -1,7 +1,7 @@
 import logging
 from flask import Flask, jsonify
-from backend.app.config import Config
-from backend.app.extensions import db, migrate, cors, init_redis
+from app.config import Config
+from app.extensions import db, migrate, cors, init_redis
 
 def create_app(config_class=Config):
     """Application factory for Merchant & User Fraud Investigation Agent backend."""
@@ -21,16 +21,16 @@ def create_app(config_class=Config):
     init_redis(app)
 
     # Initialize Swagger UI documentation
-    from backend.app.api.swagger_config import init_swagger
+    from app.api.swagger_config import init_swagger
     init_swagger(app)
 
     # Register blueprints
-    from backend.app.api.health import health_bp
-    from backend.app.api.investigations import investigations_bp
-    from backend.app.api.dashboard import dashboard_bp
-    from backend.app.api.actions import actions_bp
-    from backend.app.api.audit import audit_bp
-    from backend.app.api.integrations import integrations_bp
+    from app.api.health import health_bp
+    from app.api.investigations import investigations_bp
+    from app.api.dashboard import dashboard_bp
+    from app.api.actions import actions_bp
+    from app.api.audit import audit_bp
+    from app.api.integrations import integrations_bp
 
     app.register_blueprint(health_bp, url_prefix="/api/v1/health")
     app.register_blueprint(investigations_bp, url_prefix="/api/v1/investigations")

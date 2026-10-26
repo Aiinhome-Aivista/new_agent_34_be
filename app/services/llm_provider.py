@@ -5,8 +5,8 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional
 import httpx
 
-from backend.app.config import Config
-from backend.app.schemas.recommendation import StructuredRecommendation, IndicatorItem
+from app.config import Config
+from app.schemas.recommendation import StructuredRecommendation, IndicatorItem
 
 logger = logging.getLogger("fraud_agent.llm_provider")
 

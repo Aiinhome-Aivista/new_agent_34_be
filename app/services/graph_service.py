@@ -1,7 +1,7 @@
 import logging
 from typing import Dict, Any, List, Optional
-from backend.app.config import Config
-from backend.app.models.source_domain import Order, Payment
+from app.config import Config
+from app.models.source_domain import Order, Payment
 
 logger = logging.getLogger("fraud_agent.graph_service")
 

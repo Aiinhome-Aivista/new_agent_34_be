@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
+from urllib.parse import quote_plus
 
 # Load local environment from backend/.env or cwd
 backend_env = Path(__file__).resolve().parent.parent / ".env"
@@ -24,10 +25,11 @@ class Config:
     MYSQL_PORT: int = int(os.getenv("MYSQL_PORT", "3306"))
     MYSQL_DB: str = os.getenv("MYSQL_DB", "fraud_investigation_db")
     
-    # Default MySQL URL with fallback to SQLite for localized self-contained unit testing if MySQL is offline
+    # Default MySQL URL with fallback
+    _encoded_pwd = quote_plus(MYSQL_PASSWORD)
     SQLALCHEMY_DATABASE_URI: str = os.getenv(
         "DATABASE_URL",
-        f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}?charset=utf8mb4"
+        f"mysql+pymysql://{MYSQL_USER}:{_encoded_pwd}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}?charset=utf8mb4"
     )
     SQLALCHEMY_TRACK_MODIFICATIONS: bool = False
     SQLALCHEMY_ENGINE_OPTIONS = {

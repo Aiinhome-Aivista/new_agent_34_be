@@ -3,7 +3,7 @@ import logging
 from typing import List, Dict, Any, Optional
 import chromadb
 from chromadb.config import Settings
-from backend.app.config import Config
+from app.config import Config
 
 logger = logging.getLogger("fraud_agent.rag_service")
 

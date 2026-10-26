@@ -1,9 +1,9 @@
-from backend.app.models.source_domain import User, Order, Payment, Chargeback
-from backend.app.models.investigation import (
+from app.models.source_domain import User, Order, Payment, Chargeback
+from app.models.investigation import (
     InvestigationCase, CaseEvidence, InvestigationRun,
     Recommendation, RecommendationEvidence
 )
-from backend.app.models.governance import (
+from app.models.governance import (
     AppUser, PolicyDocument, ReviewDecision, ActionRequest,
     AuditEvent, IntegrationConfig
 )

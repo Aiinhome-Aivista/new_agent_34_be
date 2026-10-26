@@ -2,8 +2,8 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
-from backend.app.extensions import db
-from backend.app.models.governance import AuditEvent
+from app.extensions import db
+from app.models.governance import AuditEvent
 
 class AuditService:
     """Manages creation and integrity verification of audit logs."""

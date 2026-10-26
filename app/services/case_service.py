@@ -3,11 +3,11 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, Tuple, List
 from sqlalchemy.exc import IntegrityError
-from backend.app.extensions import db
-from backend.app.models.investigation import InvestigationCase, InvestigationRun
-from backend.app.schemas.trigger import TriggerRequest
-from backend.app.services.idempotency_service import IdempotencyService
-from backend.app.services.audit_service import AuditService
+from app.extensions import db
+from app.models.investigation import InvestigationCase, InvestigationRun
+from app.schemas.trigger import TriggerRequest
+from app.services.idempotency_service import IdempotencyService
+from app.services.audit_service import AuditService
 
 logger = logging.getLogger("fraud_agent.case_service")
 

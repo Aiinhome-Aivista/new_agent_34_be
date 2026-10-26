@@ -1,6 +1,6 @@
 from flask import Blueprint, jsonify
-from backend.app.services.rag_service import PolicyRAGService
-from backend.app.services.llm_provider import LLMProviderFactory
+from app.services.rag_service import PolicyRAGService
+from app.services.llm_provider import LLMProviderFactory
 
 integrations_bp = Blueprint("integrations", __name__)
 

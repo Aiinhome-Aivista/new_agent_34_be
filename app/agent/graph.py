@@ -5,17 +5,17 @@ from datetime import datetime, timezone
 from typing import Dict, Any
 from langgraph.graph import StateGraph, END
 
-from backend.app.extensions import db
-from backend.app.config import Config
-from backend.app.models.investigation import InvestigationCase, Recommendation, RecommendationEvidence
-from backend.app.schemas.recommendation import StructuredRecommendation
-from backend.app.agent.state import InvestigationState
-from backend.app.services.evidence_service import EvidenceService
-from backend.app.services.graph_service import GraphEntityService
-from backend.app.services.rag_service import PolicyRAGService
-from backend.app.services.decision_gateway import DecisionGateway
-from backend.app.services.audit_service import AuditService
-from backend.app.services.llm_provider import LLMReasoningService
+from app.extensions import db
+from app.config import Config
+from app.models.investigation import InvestigationCase, Recommendation, RecommendationEvidence
+from app.schemas.recommendation import StructuredRecommendation
+from app.agent.state import InvestigationState
+from app.services.evidence_service import EvidenceService
+from app.services.graph_service import GraphEntityService
+from app.services.rag_service import PolicyRAGService
+from app.services.decision_gateway import DecisionGateway
+from app.services.audit_service import AuditService
+from app.services.llm_provider import LLMReasoningService
 
 logger = logging.getLogger("fraud_agent.workflow")
 
