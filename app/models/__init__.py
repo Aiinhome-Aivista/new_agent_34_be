@@ -20,8 +20,10 @@ __all__ = [
     "RecommendationEvidence",
     "AppUser",
     "PolicyDocument",
+    "FraudParameter",
     "ReviewDecision",
     "ActionRequest",
     "AuditEvent",
     "IntegrationConfig",
 ]
+

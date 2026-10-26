@@ -38,6 +38,23 @@ def create_app(config_class=Config):
     app.register_blueprint(actions_bp, url_prefix="/api/v1/actions")
     app.register_blueprint(audit_bp, url_prefix="/api/v1/audit")
     app.register_blueprint(integrations_bp, url_prefix="/api/v1/integrations")
+    app.register_blueprint(auth_bp, url_prefix="/api/v1/auth")
+    app.register_blueprint(admin_bp, url_prefix="/api/v1/admin")
+    app.register_blueprint(ingestion_bp, url_prefix="/api/v1/ingest")
+
+    # Ensure tables exist, seed data is populated, and poller is active
+    with app.app_context():
+        try:
+            from app.services.seed_data import seed_all_defaults
+            seed_all_defaults()
+        except Exception as seed_err:
+            logging.getLogger("fraud_agent.init").warning(f"Seed data initialization note: {seed_err}")
+
+        try:
+            from app.services.ingest_service import AutoTriggerScheduler
+            AutoTriggerScheduler.start(app)
+        except Exception as poller_err:
+            logging.getLogger("fraud_agent.init").warning(f"Auto-trigger scheduler note: {poller_err}")
 
     # Global Error Handlers
     @app.errorhandler(404)
