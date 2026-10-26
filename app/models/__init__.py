@@ -4,7 +4,7 @@ from backend.app.models.investigation import (
     Recommendation, RecommendationEvidence
 )
 from backend.app.models.governance import (
-    AppUser, PolicyDocument, ReviewDecision, ActionRequest,
+    AppUser, PolicyDocument, FraudParameter, ReviewDecision, ActionRequest,
     AuditEvent, IntegrationConfig
 )
 
@@ -20,8 +20,10 @@ __all__ = [
     "RecommendationEvidence",
     "AppUser",
     "PolicyDocument",
+    "FraudParameter",
     "ReviewDecision",
     "ActionRequest",
     "AuditEvent",
     "IntegrationConfig",
 ]
+

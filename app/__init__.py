@@ -31,6 +31,8 @@ def create_app(config_class=Config):
     from backend.app.api.actions import actions_bp
     from backend.app.api.audit import audit_bp
     from backend.app.api.integrations import integrations_bp
+    from backend.app.api.auth import auth_bp
+    from backend.app.api.admin import admin_bp
 
     app.register_blueprint(health_bp, url_prefix="/api/v1/health")
     app.register_blueprint(investigations_bp, url_prefix="/api/v1/investigations")
@@ -38,6 +40,16 @@ def create_app(config_class=Config):
     app.register_blueprint(actions_bp, url_prefix="/api/v1/actions")
     app.register_blueprint(audit_bp, url_prefix="/api/v1/audit")
     app.register_blueprint(integrations_bp, url_prefix="/api/v1/integrations")
+    app.register_blueprint(auth_bp, url_prefix="/api/v1/auth")
+    app.register_blueprint(admin_bp, url_prefix="/api/v1/admin")
+
+    # Ensure tables exist and default seed data is populated
+    with app.app_context():
+        try:
+            from backend.app.services.seed_data import seed_all_defaults
+            seed_all_defaults()
+        except Exception as seed_err:
+            logging.getLogger("fraud_agent.init").warning(f"Seed data initialization note: {seed_err}")
 
     # Global Error Handlers
     @app.errorhandler(404)

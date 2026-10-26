@@ -13,18 +13,33 @@ def utc_now():
 def generate_uuid():
     return str(uuid.uuid4())
 
+from werkzeug.security import generate_password_hash, check_password_hash
+
 class AppUser(db.Model):
-    """Application users (investigators, supervisors, auditors). Distinct from customer users."""
+    """Application users (investigators, supervisors, auditors, admins). Distinct from customer users."""
     __tablename__ = "app_users"
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
     identity_subject = Column(String(150), unique=True, nullable=False, index=True)
     display_name = Column(String(100), nullable=False)
     email = Column(String(255), unique=True, nullable=False)
+    password_hash = Column(String(255), nullable=True)
     status = Column(String(30), nullable=False, default="ACTIVE")  # 'ACTIVE', 'INACTIVE', 'SUSPENDED'
     role = Column(String(50), nullable=False, default="INVESTIGATOR") # 'INVESTIGATOR', 'SENIOR_INVESTIGATOR', 'SUPERVISOR', 'ADMIN', 'AUDITOR'
+    avatar = Column(String(10), nullable=True)
+    badge = Column(String(50), nullable=True)
+    badge_color = Column(String(20), nullable=True)
+    description = Column(String(255), nullable=True)
     created_at = Column(TIMESTAMP, default=utc_now, nullable=False)
     updated_at = Column(TIMESTAMP, default=utc_now, onupdate=utc_now, nullable=False)
+
+    def set_password(self, password: str):
+        self.password_hash = generate_password_hash(password)
+
+    def check_password(self, password: str) -> bool:
+        if not self.password_hash:
+            return False
+        return check_password_hash(self.password_hash, password)
 
     def to_dict(self):
         return {
@@ -34,18 +49,26 @@ class AppUser(db.Model):
             "email": self.email,
             "status": self.status,
             "role": self.role,
+            "avatar": self.avatar or (self.display_name[:2].upper() if self.display_name else "US"),
+            "badge": self.badge or self.role,
+            "badge_color": self.badge_color or "#FF5A14",
+            "description": self.description or f"Role: {self.role}",
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
 class PolicyDocument(db.Model):
-    """Approved organizational policy documents indexed in vector RAG."""
+    """Approved organizational policy documents indexed in vector RAG and DB."""
     __tablename__ = "policy_documents"
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
     document_key = Column(String(100), unique=True, nullable=False, index=True)  # E.g. 'FRAUD_INVESTIGATION_SOP'
     title = Column(String(200), nullable=False)
     version = Column(String(30), nullable=False, default="1.0")
+    category = Column(String(100), nullable=True, default="GENERAL") # 'CHARGEBACK', 'AUTO_ACTION', 'DEVICE_RING', 'HUMAN_REVIEW', 'IDENTITY'
+    description = Column(String(500), nullable=True)
+    content = Column(String(2000), nullable=True)
+    action_impact = Column(String(100), nullable=True, default="ADVISORY") # 'BLOCKING', 'RESTRICTIVE', 'ADVISORY', 'MONITORING'
     status = Column(String(30), nullable=False, default="APPROVED")  # 'APPROVED', 'DRAFT', 'DEPRECATED'
     effective_from = Column(TIMESTAMP, nullable=True)
     effective_to = Column(TIMESTAMP, nullable=True)
@@ -60,11 +83,46 @@ class PolicyDocument(db.Model):
             "document_key": self.document_key,
             "title": self.title,
             "version": self.version,
+            "category": self.category or "GENERAL",
+            "description": self.description or "",
+            "content": self.content or "",
+            "action_impact": self.action_impact or "ADVISORY",
             "status": self.status,
             "effective_from": self.effective_from.isoformat() if self.effective_from else None,
             "effective_to": self.effective_to.isoformat() if self.effective_to else None,
             "source_reference": self.source_reference,
             "checksum": self.checksum,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+class FraudParameter(db.Model):
+    """System fraud parameters and inspection thresholds by section."""
+    __tablename__ = "fraud_parameters"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    parameter_key = Column(String(100), unique=True, nullable=False, index=True) # E.g. 'shared_device_cluster_limit'
+    name = Column(String(150), nullable=False)                                   # E.g. 'Shared Hardware Device Cluster Limit'
+    section = Column(String(50), nullable=False)                                 # 'USER_PROFILE', 'PAYMENT_TRANSACTION', 'ORDER_DETAILS', 'CHARGEBACK_DISPUTE', 'GRAPH_NETWORK', 'GATEWAY_RULE'
+    data_type = Column(String(30), nullable=False, default="STRING")             # 'STRING', 'NUMBER', 'BOOLEAN', 'PERCENTAGE'
+    threshold_value = Column(String(255), nullable=False)                        # E.g. '2', '50000', '1.0%', 'VERIFIED'
+    risk_weight = Column(String(30), nullable=False, default="HIGH")             # 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'
+    description = Column(String(500), nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(TIMESTAMP, default=utc_now, nullable=False)
+    updated_at = Column(TIMESTAMP, default=utc_now, onupdate=utc_now, nullable=False)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "parameter_key": self.parameter_key,
+            "name": self.name,
+            "section": self.section,
+            "data_type": self.data_type,
+            "threshold_value": self.threshold_value,
+            "risk_weight": self.risk_weight,
+            "description": self.description,
+            "is_active": self.is_active,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
