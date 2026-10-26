@@ -9,12 +9,12 @@ import threading
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
-from backend.app.extensions import db
-from backend.app.config import Config
-from backend.app.models.source_domain import User, Order, Payment, Chargeback
-from backend.app.schemas.trigger import TriggerRequest
-from backend.app.services.case_service import CaseService
-from backend.app.agent.graph import execute_case_investigation
+from app.extensions import db
+from app.config import Config
+from app.models.source_domain import User, Order, Payment, Chargeback
+from app.schemas.trigger import TriggerRequest
+from app.services.case_service import CaseService
+from app.agent.graph import execute_case_investigation
 
 logger = logging.getLogger("fraud_agent.ingest_service")
 

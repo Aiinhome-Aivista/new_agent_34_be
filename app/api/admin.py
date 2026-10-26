@@ -1,14 +1,14 @@
 import logging
 import uuid
 from flask import Blueprint, request, jsonify
-from backend.app.models.governance import PolicyDocument, FraudParameter, AppUser
-from backend.app.extensions import db
+from app.models.governance import PolicyDocument, FraudParameter, AppUser
+from app.extensions import db
 
 logger = logging.getLogger("fraud_agent.api.admin")
 admin_bp = Blueprint("admin", __name__)
 
 # ============================================================================
-# 1. Company Policies Management (CRUD)
+# 1. Company Policies Management (CRUD) 
 # ============================================================================
 
 @admin_bp.route("/policies", methods=["GET"])
@@ -229,11 +229,11 @@ def get_sections_summary():
 # 3. Knowledge Base Private Document Upload & Vector Indexing
 # ============================================================================
 
-from backend.app.services.knowledge_service import KnowledgeService
-from backend.app.services.rag_service import PolicyRAGService
+from app.services.knowledge_service import KnowledgeService
+from app.services.rag_service import PolicyRAGService
 
 @admin_bp.route("/knowledge/upload", methods=["POST"])
-def upload_knowledge_document():
+def upload_knowledge_document():    
     """
     Uploads a private company policy document (.pdf, .txt, .md, .json),
     extracts text, chunks it, and indexes it into ChromaDB vector knowledge store.

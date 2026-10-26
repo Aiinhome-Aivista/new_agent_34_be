@@ -3,9 +3,9 @@ import os
 import uuid
 import logging
 from typing import Dict, Any, List
-from backend.app.extensions import db
-from backend.app.models.governance import PolicyDocument
-from backend.app.services.rag_service import PolicyRAGService
+from app.extensions import db
+from app.models.governance import PolicyDocument
+from app.services.rag_service import PolicyRAGService
 
 logger = logging.getLogger("fraud_agent.knowledge_service")
 

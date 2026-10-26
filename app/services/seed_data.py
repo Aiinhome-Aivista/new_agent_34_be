@@ -1,6 +1,6 @@
 import logging
-from backend.app.extensions import db
-from backend.app.models.governance import AppUser, PolicyDocument, FraudParameter
+from app.extensions import db
+from app.models.governance import AppUser, PolicyDocument, FraudParameter
 
 logger = logging.getLogger("fraud_agent.seed_data")
 

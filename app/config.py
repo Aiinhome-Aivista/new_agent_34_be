@@ -25,12 +25,19 @@ class Config:
     MYSQL_PORT: int = int(os.getenv("MYSQL_PORT", "3306"))
     MYSQL_DB: str = os.getenv("MYSQL_DB", "fraud_investigation_db")
     
-    # Default MySQL URL with fallback
+    # Default MySQL URL with automatic URL-encoding protection for passwords containing '@'
     _encoded_pwd = quote_plus(MYSQL_PASSWORD)
-    SQLALCHEMY_DATABASE_URI: str = os.getenv(
+    _raw_db_url = os.getenv(
         "DATABASE_URL",
         f"mysql+pymysql://{MYSQL_USER}:{_encoded_pwd}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}?charset=utf8mb4"
     )
+    if _raw_db_url.count("@") > 1 and "://" in _raw_db_url:
+        _prefix, _remainder = _raw_db_url.split("://", 1)
+        _creds, _host = _remainder.rsplit("@", 1)
+        if ":" in _creds:
+            _u, _p = _creds.split(":", 1)
+            _raw_db_url = f"{_prefix}://{_u}:{quote_plus(_p)}@{_host}"
+    SQLALCHEMY_DATABASE_URI: str = _raw_db_url
     SQLALCHEMY_TRACK_MODIFICATIONS: bool = False
     SQLALCHEMY_ENGINE_OPTIONS = {
         "pool_size": int(os.getenv("DB_POOL_SIZE", "20")),

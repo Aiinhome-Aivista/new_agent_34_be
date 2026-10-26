@@ -1,7 +1,7 @@
 import logging
 from flask import Blueprint, request, jsonify
-from backend.app.models.governance import AppUser
-from backend.app.extensions import db
+from app.models.governance import AppUser
+from app.extensions import db
 
 logger = logging.getLogger("fraud_agent.api.auth")
 auth_bp = Blueprint("auth", __name__)

@@ -1,6 +1,6 @@
 import logging
 from flask import Blueprint, request, jsonify, Response
-from backend.app.services.ingest_service import IngestService, AutoTriggerScheduler
+from app.services.ingest_service import IngestService, AutoTriggerScheduler
 
 logger = logging.getLogger("fraud_agent.api.ingestion")
 ingestion_bp = Blueprint("ingestion", __name__)

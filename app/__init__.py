@@ -1,3 +1,6 @@
+from app.api.ingestion import ingestion_bp
+from app.api.admin import admin_bp
+from app.api.auth import auth_bp
 import logging
 from flask import Flask, jsonify
 from app.config import Config
