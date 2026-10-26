@@ -224,3 +224,79 @@ def get_sections_summary():
             "active_parameters": active_count
         })
     return jsonify(summary), 200
+
+# ============================================================================
+# 3. Knowledge Base Private Document Upload & Vector Indexing
+# ============================================================================
+
+from backend.app.services.knowledge_service import KnowledgeService
+from backend.app.services.rag_service import PolicyRAGService
+
+@admin_bp.route("/knowledge/upload", methods=["POST"])
+def upload_knowledge_document():
+    """
+    Uploads a private company policy document (.pdf, .txt, .md, .json),
+    extracts text, chunks it, and indexes it into ChromaDB vector knowledge store.
+    """
+    if "file" not in request.files:
+        return jsonify({"error": "Bad Request", "message": "No file uploaded in form"}), 400
+
+    doc_file = request.files["file"]
+    if not doc_file.filename:
+        return jsonify({"error": "Bad Request", "message": "No file selected"}), 400
+
+    document_key = request.form.get("document_key", "").strip().upper()
+    title = request.form.get("title", "").strip()
+    category = request.form.get("category", "GENERAL").strip().upper()
+    action_impact = request.form.get("action_impact", "ADVISORY").strip().upper()
+    version = request.form.get("version", "1.0").strip()
+    description = request.form.get("description", "").strip()
+
+    if not document_key or not title:
+        return jsonify({"error": "Bad Request", "message": "document_key and title are required"}), 400
+
+    try:
+        content_bytes = doc_file.read()
+        res = KnowledgeService.process_and_index_document(
+            file_bytes=content_bytes,
+            filename=doc_file.filename,
+            document_key=document_key,
+            title=title,
+            category=category,
+            action_impact=action_impact,
+            version=version,
+            description=description
+        )
+        return jsonify(res), 201
+    except ValueError as ve:
+        return jsonify({"error": "Validation Error", "message": str(ve)}), 422
+    except Exception as e:
+        logger.error(f"Error processing policy upload: {e}")
+        return jsonify({"error": "Internal Server Error", "message": str(e)}), 500
+
+@admin_bp.route("/knowledge/reindex", methods=["POST"])
+def reindex_knowledge():
+    """Re-indexes all policy documents from MySQL into ChromaDB."""
+    try:
+        res = KnowledgeService.reindex_all_policies()
+        return jsonify(res), 200
+    except Exception as e:
+        logger.error(f"Error re-indexing knowledge base: {e}")
+        return jsonify({"error": "Internal Server Error", "message": str(e)}), 500
+
+@admin_bp.route("/knowledge/status", methods=["GET"])
+def get_knowledge_status():
+    """Returns vector knowledge base collection statistics."""
+    collection = PolicyRAGService.get_collection()
+    if collection is None:
+        return jsonify({"status": "UNAVAILABLE", "vector_count": 0}), 200
+    try:
+        count = collection.count()
+        return jsonify({
+            "status": "HEALTHY",
+            "collection_name": "fraud_investigation_policies",
+            "indexed_vectors_count": count
+        }), 200
+    except Exception as e:
+        return jsonify({"status": "ERROR", "message": str(e)}), 500
+

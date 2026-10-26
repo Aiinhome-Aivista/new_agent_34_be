@@ -94,3 +94,9 @@ class Config:
 
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+
+    # ── Batch Ingestion & Auto-Trigger Settings ──────────────────────────────
+    AUTO_TRIGGER_ENABLED: bool = os.getenv("AUTO_TRIGGER_ENABLED", "true").lower() == "true"
+    TRIGGER_POLL_INTERVAL_SECONDS: int = int(os.getenv("TRIGGER_POLL_INTERVAL_SECONDS", "30"))
+    EXCEL_INGEST_WATCH_DIR: str = os.getenv("EXCEL_INGEST_WATCH_DIR", "./data/incoming_excel")
+

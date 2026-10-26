@@ -33,6 +33,7 @@ def create_app(config_class=Config):
     from backend.app.api.integrations import integrations_bp
     from backend.app.api.auth import auth_bp
     from backend.app.api.admin import admin_bp
+    from backend.app.api.ingestion import ingestion_bp
 
     app.register_blueprint(health_bp, url_prefix="/api/v1/health")
     app.register_blueprint(investigations_bp, url_prefix="/api/v1/investigations")
@@ -42,14 +43,21 @@ def create_app(config_class=Config):
     app.register_blueprint(integrations_bp, url_prefix="/api/v1/integrations")
     app.register_blueprint(auth_bp, url_prefix="/api/v1/auth")
     app.register_blueprint(admin_bp, url_prefix="/api/v1/admin")
+    app.register_blueprint(ingestion_bp, url_prefix="/api/v1/ingest")
 
-    # Ensure tables exist and default seed data is populated
+    # Ensure tables exist, seed data is populated, and poller is active
     with app.app_context():
         try:
             from backend.app.services.seed_data import seed_all_defaults
             seed_all_defaults()
         except Exception as seed_err:
             logging.getLogger("fraud_agent.init").warning(f"Seed data initialization note: {seed_err}")
+
+        try:
+            from backend.app.services.ingest_service import AutoTriggerScheduler
+            AutoTriggerScheduler.start(app)
+        except Exception as poller_err:
+            logging.getLogger("fraud_agent.init").warning(f"Auto-trigger scheduler note: {poller_err}")
 
     # Global Error Handlers
     @app.errorhandler(404)
