@@ -23,7 +23,7 @@ class GraphEntityService:
             parsed = urlparse(Config.ARANGO_HOST)
             host = parsed.hostname or "localhost"
             port = parsed.port or 8529
-            with socket.create_connection((host, port), timeout=0.3):
+            with socket.create_connection((host, port), timeout=3.0):
                 pass
         except Exception:
             cls._db = None
