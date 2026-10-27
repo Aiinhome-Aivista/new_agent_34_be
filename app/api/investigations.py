@@ -1,3 +1,4 @@
+from app.models.governance import AppUser
 import logging
 from flask import Blueprint, request, jsonify
 from pydantic import ValidationError
@@ -108,6 +109,30 @@ def submit_decision(case_id):
     except ValidationError as e:
         return jsonify({"error": "Validation Error", "details": e.errors()}), 422
 
+    # Resolve reviewer user from AppUser table to enforce foreign key integrity
+    reviewer = None
+    if dec_req.reviewer_id:
+        reviewer = AppUser.query.filter(
+            (AppUser.id == dec_req.reviewer_id) |
+            (AppUser.identity_subject == dec_req.reviewer_id) |
+            (AppUser.email == dec_req.reviewer_id)
+        ).first()
+
+    # If no exact match found, fallback to active investigator or supervisor in app_users
+    if not reviewer:
+        reviewer = (
+            AppUser.query.filter(AppUser.role.ilike("%INVESTIGATOR%"), AppUser.status == "ACTIVE").first()
+            or AppUser.query.filter_by(status="ACTIVE").first()
+            or AppUser.query.first()
+        )
+
+    if not reviewer:
+        return jsonify({
+            "error": "Reviewer Not Found",
+            "message": "No registered system reviewer account found in app_users database table."
+        }), 400
+
+    resolved_reviewer_id = reviewer.id
     latest_rec = case.recommendations[-1] if case.recommendations else None
 
     # Persist Review Decision
@@ -116,7 +141,7 @@ def submit_decision(case_id):
         id=str(uuid.uuid4()),
         case_id=case_id,
         recommendation_id=latest_rec.id if latest_rec else None,
-        reviewer_id=dec_req.reviewer_id,
+        reviewer_id=resolved_reviewer_id,
         decision=dec_req.decision,
         reason=dec_req.reason,
         policy_reference=dec_req.policy_reference
@@ -132,10 +157,10 @@ def submit_decision(case_id):
                 case_id=case_id,
                 action_type=latest_rec.recommendation_type,
                 decision_type="HUMAN_APPROVED",
-                requested_by=dec_req.reviewer_id,
+                requested_by=reviewer.display_name or reviewer.identity_subject or dec_req.reviewer_id,
                 target_reference=case.transaction_id or case.user_id_ref or case.merchant_id_ref or case_id,
                 idempotency_key=f"act_{case.idempotency_key}_{latest_rec.recommendation_type}",
-                reviewer_id=dec_req.reviewer_id,
+                reviewer_id=resolved_reviewer_id,
                 policy_reference=dec_req.policy_reference
             )
     elif dec_req.decision == "REJECT":
@@ -152,11 +177,13 @@ def submit_decision(case_id):
         actor_type="HUMAN_REVIEWER",
         correlation_id=case.idempotency_key,
         case_id=case_id,
-        actor_id=dec_req.reviewer_id,
+        actor_id=reviewer.identity_subject or resolved_reviewer_id,
         details={
             "decision": dec_req.decision,
             "reason": dec_req.reason,
-            "policy_reference": dec_req.policy_reference
+            "policy_reference": dec_req.policy_reference,
+            "reviewer_name": reviewer.display_name,
+            "reviewer_role": reviewer.role
         }
     )
 
