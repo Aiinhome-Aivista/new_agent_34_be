@@ -1,15 +1,18 @@
+import json
 import logging
-from flask import Blueprint, request, jsonify, Response
+from flask import Blueprint, request, jsonify, Response, stream_with_context
 from backend.app.services.ingest_service import IngestService, AutoTriggerScheduler
 
 logger = logging.getLogger("fraud_agent.api.ingestion")
 ingestion_bp = Blueprint("ingestion", __name__)
 
 @ingestion_bp.route("/upload", methods=["POST"])
+@ingestion_bp.route("/upload-stream", methods=["POST"])
 def upload_batch_file():
     """
     Accepts multipart Excel (.xlsx) or CSV (.csv) file upload.
     Parses transactions, updates MySQL source domain tables, and triggers fraud investigations.
+    Supports real-time SSE event streaming when stream=true or when calling /upload-stream.
     """
     if "file" not in request.files:
         return jsonify({"error": "Bad Request", "message": "No file part in multipart request"}), 400
@@ -20,9 +23,30 @@ def upload_batch_file():
 
     filename = uploaded_file.filename
     auto_investigate = request.form.get("auto_investigate", "true").lower() == "true"
+    stream_mode = (
+        request.path.endswith("/upload-stream") or
+        request.args.get("stream", "false").lower() == "true" or
+        "text/event-stream" in request.headers.get("Accept", "")
+    )
 
     try:
         content = uploaded_file.read()
+        if stream_mode:
+            def generate():
+                for step in IngestService.parse_and_ingest_stream(content, filename, auto_investigate=auto_investigate):
+                    yield f"data: {json.dumps(step)}\n\n"
+
+            return Response(
+                stream_with_context(generate()),
+                mimetype="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                    "Connection": "keep-alive",
+                    "Access-Control-Allow-Origin": "*"
+                }
+            )
+
         res = IngestService.parse_and_ingest(content, filename, auto_investigate=auto_investigate)
         return jsonify(res), 200
     except ValueError as ve:

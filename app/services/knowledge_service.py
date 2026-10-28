@@ -13,7 +13,7 @@ class KnowledgeService:
     """Manages company private policy document upload, text extraction, and vector indexing."""
 
     @classmethod
-    def process_and_index_document(
+    def process_and_index_document_stream(
         cls,
         file_bytes: bytes,
         filename: str,
@@ -23,11 +23,21 @@ class KnowledgeService:
         action_impact: str = "ADVISORY",
         version: str = "1.0",
         description: str = ""
-    ) -> Dict[str, Any]:
+    ):
         """
-        Extracts text from uploaded PDF or text-based policy document,
-        persists metadata in MySQL, and indexes semantic chunks in ChromaDB.
+        Generator that extracts text from document, upserts database record,
+        embeds vector chunks into ChromaDB, and yields real-time progress events.
         """
+        yield {
+            "event": "extracting",
+            "status": "PROCESSING",
+            "current": 0,
+            "total": 100,
+            "percent": 10,
+            "filename": filename,
+            "message": f"Extracting text from {filename}..."
+        }
+
         extracted_text = ""
         ext = os.path.splitext(filename)[1].lower()
 
@@ -45,7 +55,6 @@ class KnowledgeService:
                 logger.error(f"PDF extraction failed: {e}")
                 raise ValueError(f"Could not read PDF content: {str(e)}")
         else:
-            # Handle .txt, .md, .json, .csv, etc.
             try:
                 extracted_text = file_bytes.decode("utf-8", errors="replace").strip()
             except Exception as e:
@@ -53,6 +62,15 @@ class KnowledgeService:
 
         if not extracted_text:
             raise ValueError("Document appears to be empty or contains no extractable text.")
+
+        yield {
+            "event": "saving",
+            "status": "PROCESSING",
+            "current": 1,
+            "total": 100,
+            "percent": 25,
+            "message": f"Saving policy '{title}' metadata to MySQL governance registry..."
+        }
 
         # 1. Upsert into MySQL PolicyDocument
         doc_key_clean = document_key.strip().upper()
@@ -66,7 +84,7 @@ class KnowledgeService:
                 category=category.strip().upper(),
                 action_impact=action_impact.strip().upper(),
                 description=description.strip() or f"Company policy document imported from {filename}",
-                content=extracted_text[:1800], # Preview content snippet
+                content=extracted_text[:1800],
                 status="APPROVED",
                 source_reference=filename
             )
@@ -85,10 +103,24 @@ class KnowledgeService:
 
         # 2. Chunk text and index into ChromaDB
         chunks = cls._chunk_text(extracted_text, chunk_size=750, overlap=100)
+        total_chunks = len(chunks)
         indexed_chunks = 0
 
+        yield {
+            "event": "chunking",
+            "status": "PROCESSING",
+            "current": 0,
+            "total": total_chunks,
+            "percent": 35,
+            "total_chunks": total_chunks,
+            "message": f"Generated {total_chunks} semantic chunks. Vectorizing into ChromaDB..."
+        }
+
         for i, chunk in enumerate(chunks):
-            section_name = f"Section_{i+1}"
+            current_num = i + 1
+            percent = min(96, round(35 + (current_num / total_chunks) * 60))
+            section_name = f"Section_{current_num}"
+
             success = PolicyRAGService.ingest_policy(
                 document_key=doc_key_clean,
                 title=title,
@@ -99,18 +131,73 @@ class KnowledgeService:
             if success:
                 indexed_chunks += 1
 
-        logger.info(f"Knowledge Document {doc_key_clean} ingested: {indexed_chunks}/{len(chunks)} chunks indexed in ChromaDB.")
+            yield {
+                "event": "indexing",
+                "status": "PROCESSING",
+                "current": current_num,
+                "total": total_chunks,
+                "percent": percent,
+                "item_id": f"Chunk {current_num}/{total_chunks}",
+                "message": f"Vectorized chunk {current_num} of {total_chunks} ({doc_key_clean} - {section_name})..."
+            }
 
-        return {
+        logger.info(f"Knowledge Document {doc_key_clean} ingested: {indexed_chunks}/{total_chunks} chunks indexed in ChromaDB.")
+
+        yield {
+            "event": "complete",
             "status": "SUCCESS",
             "document_key": doc_key_clean,
             "title": title,
             "category": category,
             "total_characters": len(extracted_text),
             "chunks_indexed": indexed_chunks,
+            "total_chunks": total_chunks,
+            "current": total_chunks,
+            "total": total_chunks,
+            "percent": 100,
             "filename": filename,
             "message": f"Successfully processed and indexed '{title}' ({indexed_chunks} vector chunks in ChromaDB)."
         }
+
+    @classmethod
+    def process_and_index_document(
+        cls,
+        file_bytes: bytes,
+        filename: str,
+        document_key: str,
+        title: str,
+        category: str = "GENERAL",
+        action_impact: str = "ADVISORY",
+        version: str = "1.0",
+        description: str = ""
+    ) -> Dict[str, Any]:
+        """Synchronous wrapper for process_and_index_document_stream."""
+        final_res = None
+        for step in cls.process_and_index_document_stream(
+            file_bytes=file_bytes,
+            filename=filename,
+            document_key=document_key,
+            title=title,
+            category=category,
+            action_impact=action_impact,
+            version=version,
+            description=description
+        ):
+            if step.get("event") == "complete":
+                final_res = step
+
+        if final_res:
+            return {
+                "status": final_res.get("status", "SUCCESS"),
+                "document_key": final_res.get("document_key"),
+                "title": final_res.get("title"),
+                "category": final_res.get("category"),
+                "total_characters": final_res.get("total_characters", 0),
+                "chunks_indexed": final_res.get("chunks_indexed", 0),
+                "filename": final_res.get("filename"),
+                "message": final_res.get("message")
+            }
+        raise ValueError("Document processing failed.")
 
     @classmethod
     def reindex_all_policies(cls) -> Dict[str, Any]:

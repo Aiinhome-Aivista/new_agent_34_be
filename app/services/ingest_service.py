@@ -25,10 +25,10 @@ class IngestService:
     """Processes batch transaction records from Excel/CSV and auto-triggers fraud investigations."""
 
     @classmethod
-    def parse_and_ingest(cls, file_content: bytes, filename: str, auto_investigate: bool = True) -> Dict[str, Any]:
+    def parse_and_ingest_stream(cls, file_content: bytes, filename: str, auto_investigate: bool = True):
         """
-        Parses Excel (.xlsx) or CSV (.csv) file content, synchronizes MySQL source domain tables,
-        and triggers the fraud investigation agent for each payment record.
+        Generator that parses Excel/CSV file content, updates database records,
+        triggers investigations, and yields real-time progress events for each row.
         """
         rows = []
         is_excel = filename.lower().endswith(".xlsx") or filename.lower().endswith(".xls")
@@ -65,22 +65,54 @@ class IngestService:
                 logger.error(f"Failed to parse CSV file: {e}")
                 raise ValueError(f"CSV parsing error: {str(e)}")
 
-        if not rows:
-            return {
+        total_rows = len(rows)
+        if total_rows == 0:
+            yield {
+                "event": "complete",
                 "status": "EMPTY",
                 "message": "No valid data rows found in uploaded file.",
                 "total_rows": 0,
+                "current": 0,
+                "total": 0,
+                "percent": 100,
                 "ingested": 0,
                 "triggered_cases": []
             }
+            return
+
+        yield {
+            "event": "start",
+            "status": "PROCESSING",
+            "message": f"Parsed {total_rows} records from {filename}. Starting batch ingestion...",
+            "total_rows": total_rows,
+            "current": 0,
+            "total": total_rows,
+            "percent": 5,
+            "filename": filename
+        }
 
         ingested_count = 0
         triggered_cases = []
 
         for idx, row in enumerate(rows):
+            current_num = idx + 1
+            percent = min(95, round(5 + (current_num / total_rows) * 90))
+            user_id = row.get("user_id") or row.get("customer_id") or f"USR_{uuid.uuid4().hex[:8].upper()}"
+            payment_id = row.get("payment_id") or row.get("transaction_id") or f"PAY_{uuid.uuid4().hex[:10].upper()}"
+
+            yield {
+                "event": "row_start",
+                "status": "PROCESSING",
+                "current": current_num,
+                "total": total_rows,
+                "percent": percent,
+                "item_id": payment_id,
+                "user_id": user_id,
+                "message": f"Processing record {current_num} of {total_rows}: {payment_id} ({user_id})..."
+            }
+
             try:
                 # 1. Normalize User / Customer
-                user_id = row.get("user_id") or row.get("customer_id") or f"USR_{uuid.uuid4().hex[:8].upper()}"
                 user = User.query.filter_by(user_id=user_id).first()
                 if not user:
                     user = User(
@@ -145,7 +177,6 @@ class IngestService:
                     db.session.add(order)
 
                 # 4. Normalize Payment
-                payment_id = row.get("payment_id") or row.get("transaction_id") or f"PAY_{uuid.uuid4().hex[:10].upper()}"
                 payment = Payment.query.filter_by(payment_id=payment_id).first()
                 if not payment:
                     payment = Payment(
@@ -187,6 +218,7 @@ class IngestService:
                 ingested_count += 1
 
                 # 6. Auto-Trigger Fraud Investigation Agent
+                case_summary = None
                 if auto_investigate:
                     trigger_reason = (
                         row.get("trigger_reason") or
@@ -216,7 +248,7 @@ class IngestService:
                     # Refresh case data
                     db.session.refresh(case)
                     rec = case.recommendations[-1] if case.recommendations else None
-                    triggered_cases.append({
+                    case_summary = {
                         "case_id": case.id,
                         "transaction_id": payment.payment_id,
                         "user_id": user.user_id,
@@ -226,18 +258,69 @@ class IngestService:
                         "recommendation": rec.recommendation_type if rec else "PENDING",
                         "explanation": rec.explanation if rec else "Investigation in progress",
                         "created_at": case.created_at.isoformat()
-                    })
+                    }
+                    triggered_cases.append(case_summary)
+
+                yield {
+                    "event": "row_done",
+                    "status": "PROCESSING",
+                    "current": current_num,
+                    "total": total_rows,
+                    "percent": percent,
+                    "item_id": payment_id,
+                    "user_id": user.user_id,
+                    "case": case_summary,
+                    "message": f"Processed record {current_num} of {total_rows}: {case_summary['assessment'] if case_summary else 'SAVED'}"
+                }
 
             except Exception as row_err:
                 db.session.rollback()
                 logger.error(f"Error processing row {idx+1}: {row_err}")
+                yield {
+                    "event": "row_error",
+                    "status": "PROCESSING",
+                    "current": current_num,
+                    "total": total_rows,
+                    "percent": percent,
+                    "item_id": payment_id,
+                    "error": str(row_err),
+                    "message": f"Error on record {current_num}: {str(row_err)}"
+                }
 
-        return {
+        yield {
+            "event": "complete",
             "status": "SUCCESS",
-            "message": f"Processed {len(rows)} records. Ingested {ingested_count} transactions and triggered {len(triggered_cases)} fraud investigations.",
-            "total_rows": len(rows),
+            "message": f"Processed {total_rows} records. Ingested {ingested_count} transactions and triggered {len(triggered_cases)} fraud investigations.",
+            "total_rows": total_rows,
+            "current": total_rows,
+            "total": total_rows,
+            "percent": 100,
             "ingested": ingested_count,
             "triggered_cases": triggered_cases
+        }
+
+    @classmethod
+    def parse_and_ingest(cls, file_content: bytes, filename: str, auto_investigate: bool = True) -> Dict[str, Any]:
+        """Synchronous wrapper for parse_and_ingest_stream."""
+        final_res = None
+        for step in cls.parse_and_ingest_stream(file_content, filename, auto_investigate=auto_investigate):
+            if step.get("event") == "complete":
+                final_res = step
+
+        if final_res:
+            return {
+                "status": final_res.get("status", "SUCCESS"),
+                "message": final_res.get("message", ""),
+                "total_rows": final_res.get("total_rows", 0),
+                "ingested": final_res.get("ingested", 0),
+                "triggered_cases": final_res.get("triggered_cases", [])
+            }
+        return {
+            "status": "EMPTY",
+            "message": "No valid data rows found in uploaded file.",
+            "total_rows": 0,
+            "ingested": 0,
+            "triggered_cases": []
         }
 
     @classmethod
