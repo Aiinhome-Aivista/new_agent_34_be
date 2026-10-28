@@ -10,6 +10,14 @@ from app.extensions import db
 def utc_now():
     return datetime.now(timezone.utc)
 
+def to_utc_iso(dt):
+    if not dt:
+        return None
+    iso = dt.isoformat()
+    if not iso.endswith("Z") and not ("+" in iso[10:] or "-" in iso[10:]):
+        return iso + "Z"
+    return iso
+
 def generate_uuid():
     return str(uuid.uuid4())
 
@@ -62,10 +70,10 @@ class InvestigationCase(db.Model):
             "merchant_id_ref": self.merchant_id_ref,
             "created_by": self.created_by,
             "idempotency_key": self.idempotency_key,
-            "started_at": self.started_at.isoformat() if self.started_at else None,
-            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "started_at": to_utc_iso(self.started_at),
+            "completed_at": to_utc_iso(self.completed_at),
+            "created_at": to_utc_iso(self.created_at),
+            "updated_at": to_utc_iso(self.updated_at),
         }
 
 class CaseEvidence(db.Model):
@@ -97,10 +105,10 @@ class CaseEvidence(db.Model):
             "source_system": self.source_system,
             "source_reference": self.source_reference,
             "retrieval_status": self.retrieval_status,
-            "retrieved_at": self.retrieved_at.isoformat() if self.retrieved_at else None,
+            "retrieved_at": to_utc_iso(self.retrieved_at),
             "normalized_payload": self.normalized_payload,
             "content_hash": self.content_hash,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "created_at": to_utc_iso(self.created_at),
         }
 
 class InvestigationRun(db.Model):
@@ -126,8 +134,8 @@ class InvestigationRun(db.Model):
             "run_number": self.run_number,
             "status": self.status,
             "workflow_version": self.workflow_version,
-            "started_at": self.started_at.isoformat() if self.started_at else None,
-            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "started_at": to_utc_iso(self.started_at),
+            "completed_at": to_utc_iso(self.completed_at),
             "error_code": self.error_code,
             "error_summary": self.error_summary,
         }
@@ -168,7 +176,7 @@ class Recommendation(db.Model):
             "prompt_version": self.prompt_version,
             "policy_version": self.policy_version,
             "structured_result": self.structured_result,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "created_at": to_utc_iso(self.created_at),
         }
 
 class RecommendationEvidence(db.Model):

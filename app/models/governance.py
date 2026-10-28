@@ -10,6 +10,14 @@ from app.extensions import db
 def utc_now():
     return datetime.now(timezone.utc)
 
+def to_utc_iso(dt):
+    if not dt:
+        return None
+    iso = dt.isoformat()
+    if not iso.endswith("Z") and not ("+" in iso[10:] or "-" in iso[10:]):
+        return iso + "Z"
+    return iso
+
 def generate_uuid():
     return str(uuid.uuid4())
 
@@ -195,9 +203,9 @@ class ActionRequest(db.Model):
             "target_reference": self.target_reference,
             "downstream_reference": self.downstream_reference,
             "error_code": self.error_code,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "executed_at": self.executed_at.isoformat() if self.executed_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "created_at": to_utc_iso(self.created_at),
+            "executed_at": to_utc_iso(self.executed_at),
+            "updated_at": to_utc_iso(self.updated_at),
         }
 
 class AuditEvent(db.Model):
@@ -226,7 +234,7 @@ class AuditEvent(db.Model):
             "actor_type": self.actor_type,
             "actor_id": self.actor_id,
             "event_type": self.event_type,
-            "event_timestamp": self.event_timestamp.isoformat() if self.event_timestamp else None,
+            "event_timestamp": to_utc_iso(self.event_timestamp),
             "correlation_id": self.correlation_id,
             "details": self.details,
             "event_hash": self.event_hash,
