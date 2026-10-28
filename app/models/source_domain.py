@@ -212,3 +212,185 @@ class Chargeback(db.Model):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+# =============================================================================
+# Dedicated Master Tables with `m_` Prefix
+# =============================================================================
+
+class MUser(db.Model):
+    """Master Users table (m_users)."""
+    __tablename__ = "m_users"
+
+    user_id = Column(String(36), primary_key=True)
+    external_user_id = Column(String(100), unique=True, nullable=True)
+    first_name = Column(String(100), nullable=True)
+    last_name = Column(String(100), nullable=True)
+    email = Column(String(255), unique=True, nullable=False)
+    phone_number = Column(String(30), nullable=True)
+    user_type = Column(String(30), nullable=False, default="CUSTOMER")  # CUSTOMER, MERCHANT, ADMIN
+    status = Column(String(30), nullable=False, default="ACTIVE")      # ACTIVE, BLOCKED, SUSPENDED, LOCKED, MONITORING
+    country_code = Column(CHAR(2), nullable=True, default="IN")
+    kyc_status = Column(String(30), nullable=True, default="PENDING")   # NOT_STARTED, PENDING, VERIFIED, REJECTED
+    risk_level = Column(String(20), nullable=True, default="LOW")       # LOW, MEDIUM, HIGH, CRITICAL
+    risk_score = Column(DECIMAL(5, 2), nullable=True, default=15.00)
+    created_at = Column(TIMESTAMP, default=utc_now, nullable=False)
+    updated_at = Column(TIMESTAMP, default=utc_now, onupdate=utc_now, nullable=False)
+    last_login_at = Column(TIMESTAMP, nullable=True)
+
+    __table_args__ = (
+        Index("idx_m_users_type_status", "user_type", "status"),
+        Index("idx_m_users_risk", "risk_level", "risk_score"),
+    )
+
+    def to_dict(self):
+        return {
+            "user_id": self.user_id,
+            "external_user_id": self.external_user_id,
+            "first_name": self.first_name,
+            "last_name": self.last_name,
+            "email": self.email,
+            "phone_number": self.phone_number,
+            "user_type": self.user_type,
+            "status": self.status,
+            "country_code": self.country_code,
+            "kyc_status": self.kyc_status,
+            "risk_level": self.risk_level,
+            "risk_score": float(self.risk_score) if self.risk_score is not None else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "last_login_at": self.last_login_at.isoformat() if self.last_login_at else None,
+        }
+
+
+class MOrder(db.Model):
+    """Master Orders table (m_orders)."""
+    __tablename__ = "m_orders"
+
+    order_id = Column(String(36), primary_key=True)
+    merchant_order_id = Column(String(100), nullable=True)
+    user_id = Column(String(36), nullable=False)
+    merchant_id = Column(String(36), nullable=False)
+    amount = Column(DECIMAL(18, 2), nullable=False)
+    currency = Column(CHAR(3), nullable=False, default="INR")
+    order_status = Column(String(30), nullable=False, default="PAID")  # CREATED, PENDING, PAID, FAILED, CANCELLED, REFUNDED
+    description = Column(String(500), nullable=True)
+    ip_address = Column(String(45), nullable=True)
+    device_id = Column(String(255), nullable=True)
+    billing_country = Column(CHAR(2), nullable=True, default="IN")
+    shipping_country = Column(CHAR(2), nullable=True, default="IN")
+    created_at = Column(TIMESTAMP, default=utc_now, nullable=False)
+    updated_at = Column(TIMESTAMP, default=utc_now, onupdate=utc_now, nullable=False)
+
+    __table_args__ = (
+        Index("idx_m_orders_user_created", "user_id", "created_at"),
+        Index("idx_m_orders_merchant_created", "merchant_id", "created_at"),
+    )
+
+    def to_dict(self):
+        return {
+            "order_id": self.order_id,
+            "merchant_order_id": self.merchant_order_id,
+            "user_id": self.user_id,
+            "merchant_id": self.merchant_id,
+            "amount": float(self.amount),
+            "currency": self.currency,
+            "order_status": self.order_status,
+            "description": self.description,
+            "ip_address": self.ip_address,
+            "device_id": self.device_id,
+            "billing_country": self.billing_country,
+            "shipping_country": self.shipping_country,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class MPayment(db.Model):
+    """Master Payments table (m_payments)."""
+    __tablename__ = "m_payments"
+
+    payment_id = Column(String(36), primary_key=True)
+    order_id = Column(String(36), nullable=False)
+    user_id = Column(String(36), nullable=False)
+    merchant_id = Column(String(36), nullable=False)
+    gateway_transaction_id = Column(String(150), nullable=True)
+    idempotency_key = Column(String(150), nullable=True)
+    payment_method = Column(String(30), nullable=False, default="CARD")  # CARD, UPI, WALLET, NET_BANKING
+    payment_status = Column(String(30), nullable=False, default="AUTHORIZED")  # INITIATED, PROCESSING, AUTHORIZED, CAPTURED, FAILED
+    amount = Column(DECIMAL(18, 2), nullable=False)
+    currency = Column(CHAR(3), nullable=False, default="INR")
+    processor_name = Column(String(100), nullable=True)
+    failure_code = Column(String(100), nullable=True)
+    failure_reason = Column(String(500), nullable=True)
+    ip_address = Column(String(45), nullable=True)
+    device_id = Column(String(255), nullable=True)
+    initiated_at = Column(TIMESTAMP, default=utc_now, nullable=False)
+    updated_at = Column(TIMESTAMP, default=utc_now, onupdate=utc_now, nullable=False)
+
+    __table_args__ = (
+        Index("idx_m_payments_user_initiated", "user_id", "initiated_at"),
+        Index("idx_m_payments_order", "order_id"),
+    )
+
+    def to_dict(self):
+        return {
+            "payment_id": self.payment_id,
+            "order_id": self.order_id,
+            "user_id": self.user_id,
+            "merchant_id": self.merchant_id,
+            "gateway_transaction_id": self.gateway_transaction_id,
+            "idempotency_key": self.idempotency_key,
+            "payment_method": self.payment_method,
+            "payment_status": self.payment_status,
+            "amount": float(self.amount),
+            "currency": self.currency,
+            "processor_name": self.processor_name,
+            "failure_code": self.failure_code,
+            "failure_reason": self.failure_reason,
+            "ip_address": self.ip_address,
+            "device_id": self.device_id,
+            "initiated_at": self.initiated_at.isoformat() if self.initiated_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class MChargeback(db.Model):
+    """Master Chargebacks table (m_chargebacks)."""
+    __tablename__ = "m_chargebacks"
+
+    chargeback_id = Column(String(36), primary_key=True)
+    payment_id = Column(String(36), nullable=False)
+    order_id = Column(String(36), nullable=False)
+    processor_case_id = Column(String(150), nullable=True)
+    amount = Column(DECIMAL(18, 2), nullable=False)
+    currency = Column(CHAR(3), nullable=False, default="INR")
+    reason_code = Column(String(50), nullable=True)
+    reason_description = Column(String(500), nullable=True)
+    chargeback_status = Column(String(30), nullable=False, default="OPEN")  # OPEN, UNDER_REVIEW, ACCEPTED, DISPUTED, CLOSED
+    fraud_indicator = Column(Boolean, default=True)
+    received_at = Column(TIMESTAMP, default=utc_now, nullable=False)
+    created_at = Column(TIMESTAMP, default=utc_now, nullable=False)
+    updated_at = Column(TIMESTAMP, default=utc_now, onupdate=utc_now, nullable=False)
+
+    __table_args__ = (
+        Index("idx_m_chargebacks_payment", "payment_id"),
+        Index("idx_m_chargebacks_order", "order_id"),
+    )
+
+    def to_dict(self):
+        return {
+            "chargeback_id": self.chargeback_id,
+            "payment_id": self.payment_id,
+            "order_id": self.order_id,
+            "processor_case_id": self.processor_case_id,
+            "amount": float(self.amount),
+            "currency": self.currency,
+            "reason_code": self.reason_code,
+            "reason_description": self.reason_description,
+            "chargeback_status": self.chargeback_status,
+            "fraud_indicator": self.fraud_indicator,
+            "received_at": self.received_at.isoformat() if self.received_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }

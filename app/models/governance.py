@@ -143,7 +143,7 @@ class ReviewDecision(db.Model):
     case_id = Column(String(36), ForeignKey("investigation_cases.id"), nullable=False)
     recommendation_id = Column(String(36), ForeignKey("recommendations.id"), nullable=True)
     reviewer_id = Column(String(36), ForeignKey("app_users.id"), nullable=False)
-    decision = Column(String(50), nullable=False)  # 'APPROVE', 'REJECT', 'REQUEST_EVIDENCE', 'MONITOR', 'ESCALATE'
+    decision = Column(String(50), nullable=False)  # 'APPROVE', 'REJECT', 'REQUEST_EVIDENCE', 'MONITOR', 'ESCALATE', 'LOCK_USER', 'UNLOCK_USER'
     reason = Column(String(1000), nullable=False)
     policy_reference = Column(String(200), nullable=True)
     created_at = Column(TIMESTAMP, default=utc_now, nullable=False)
@@ -170,7 +170,7 @@ class ActionRequest(db.Model):
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
     case_id = Column(String(36), ForeignKey("investigation_cases.id"), nullable=False)
-    action_type = Column(String(50), nullable=False)       # 'HOLD_TRANSACTION', 'TEMPORARY_RESTRICTION', 'BLOCK_MERCHANT', etc.
+    action_type = Column(String(50), nullable=False)       # 'LOCK_USER', 'UNLOCK_USER', 'REQUEST_EVIDENCE', 'ESCALATE', 'MONITOR', etc.
     decision_type = Column(String(50), nullable=False)     # 'HUMAN_APPROVED', 'POLICY_AUTO_AUTHORIZED'
     requested_by = Column(String(100), nullable=False)
     reviewer_id = Column(String(36), ForeignKey("app_users.id"), nullable=True)
@@ -214,9 +214,10 @@ class AuditEvent(db.Model):
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
     case_id = Column(String(36), ForeignKey("investigation_cases.id"), nullable=True)
+    user_id = Column(String(36), nullable=True)
     actor_type = Column(String(50), nullable=False)  # 'SYSTEM_TRIGGER', 'AGENT_WORKFLOW', 'HUMAN_REVIEWER', 'ACTION_SERVICE'
     actor_id = Column(String(100), nullable=True)
-    event_type = Column(String(100), nullable=False) # 'TRIGGER_RECEIVED', 'EVIDENCE_COLLECTED', 'RECOMMENDATION_GENERATED', 'DECISION_SUBMITTED', 'ACTION_EXECUTED'
+    event_type = Column(String(100), nullable=False) # 'TRIGGER_RECEIVED', 'EVIDENCE_COLLECTED', 'RECOMMENDATION_GENERATED', 'DECISION_SUBMITTED', 'ACTION_EXECUTED', 'LOCK_USER', 'UNLOCK_USER', 'REQUEST_EVIDENCE', 'DOCUMENT_UPLOADED', 'ESCALATE', 'MONITOR'
     event_timestamp = Column(TIMESTAMP, default=utc_now, nullable=False)
     correlation_id = Column(String(100), nullable=False, index=True)
     details = Column(JSON, nullable=True)
@@ -224,6 +225,7 @@ class AuditEvent(db.Model):
 
     __table_args__ = (
         Index("idx_audit_case_time", "case_id", "event_timestamp"),
+        Index("idx_audit_user_time", "user_id", "event_timestamp"),
         Index("idx_audit_event_type", "event_type"),
     )
 
@@ -231,6 +233,7 @@ class AuditEvent(db.Model):
         return {
             "id": self.id,
             "case_id": self.case_id,
+            "user_id": self.user_id,
             "actor_type": self.actor_type,
             "actor_id": self.actor_id,
             "event_type": self.event_type,

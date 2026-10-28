@@ -281,8 +281,27 @@ def _ensure_table_columns():
             except Exception:
                 pass
 
+def seed_default_sop_policies():
+    """Seeds only the standard 5 SOPs."""
+    for pol in DEFAULT_POLICIES:
+        p_obj = PolicyDocument.query.filter_by(document_key=pol["document_key"]).first()
+        if not p_obj:
+            p_obj = PolicyDocument(
+                document_key=pol["document_key"],
+                title=pol["title"],
+                version=pol["version"],
+                category=pol["category"],
+                action_impact=pol["action_impact"],
+                description=pol["description"],
+                content=pol["content"],
+                status=pol["status"],
+                source_reference=pol["source_reference"]
+            )
+            db.session.add(p_obj)
+    db.session.commit()
+
 def seed_all_defaults():
-    """Seeds default Personas, Policies, and Parameters into MySQL if not present."""
+    """Seeds default Personas, Policies, Parameters, and Master Domain tables into MySQL."""
     _ensure_table_columns()
     db.create_all()
 
@@ -306,7 +325,6 @@ def seed_all_defaults():
             db.session.add(user)
             seeded_users += 1
         else:
-            # Update password hash if not set
             if not user.password_hash:
                 user.set_password(p["password"])
             if not user.avatar:
@@ -318,7 +336,7 @@ def seed_all_defaults():
             if not user.description:
                 user.description = p["description"]
 
-    # 2. Seed Policies
+    # 2. Seed Standard 5 SOP Policies
     seeded_policies = 0
     for pol in DEFAULT_POLICIES:
         p_obj = PolicyDocument.query.filter_by(document_key=pol["document_key"]).first()
@@ -356,6 +374,16 @@ def seed_all_defaults():
             seeded_params += 1
 
     db.session.commit()
+
+    # 4. Seed Master Tables (m_users, m_orders, m_payments, m_chargebacks) if empty
+    try:
+        from app.models.source_domain import MUser
+        if MUser.query.count() == 0:
+            from seed_master_tables import seed_master_domain_data
+            seed_master_domain_data()
+    except Exception as m_seed_err:
+        logger.warning(f"Master tables seeding note: {m_seed_err}")
+
     logger.info(f"Database seed completed: {seeded_users} users, {seeded_policies} policies, {seeded_params} parameters.")
     return {
         "users": seeded_users,

@@ -4,7 +4,7 @@ FraudOps AI — Database & Vector Store Cleanup Utility
 =====================================================
 Cleans all investigation cases, evidence, audit logs, orders, payments,
 and resets the ChromaDB vector database while strictly preserving:
-  - users (source domain user records)
+  - m_users & users (master & source domain user records)
   - app_users (login personas: Admin, Senior Investigator, Supervisor, Auditor)
   - fraud_parameters (fraud detection thresholds across all 6 sections)
 """
@@ -14,15 +14,24 @@ import sys
 import argparse
 from pathlib import Path
 
-# Ensure workspace root is in sys.path
-root_dir = str(Path(__file__).resolve().parent.parent)
+# Ensure workspace root and backend are in sys.path
+root_dir = str(Path(__file__).resolve().parent)
 if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
+parent_dir = str(Path(__file__).resolve().parent.parent)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
 
 from sqlalchemy import text
-from backend.app import create_app
-from backend.app.extensions import db
-from backend.app.config import Config
+try:
+    from app import create_app
+    from app.extensions import db
+    from app.config import Config
+except ImportError:
+    from backend.app import create_app
+    from backend.app.extensions import db
+    from backend.app.config import Config
+
 import chromadb
 from chromadb.config import Settings
 
@@ -41,7 +50,7 @@ def print_banner():
     print(f"\n{BOLD}{CYAN}================================================================================={RESET}")
     print(f"{BOLD}{CYAN}      🧹 FraudOps AI — Database & Vector DB Cleanup Utility                      {RESET}")
     print(f"{BOLD}{CYAN}================================================================================={RESET}")
-    print(f"{YELLOW}• Preserves:{RESET}  {BOLD}users{RESET}, {BOLD}app_users{RESET} (login personas), {BOLD}fraud_parameters{RESET}")
+    print(f"{YELLOW}• Preserves:{RESET}  {BOLD}m_users{RESET}, {BOLD}users{RESET}, {BOLD}app_users{RESET} (login personas), {BOLD}fraud_parameters{RESET}")
     print(f"{RED}• Cleans:{RESET}     Cases, Evidence, Runs, Recommendations, Audits, Orders, Payments")
     print(f"{BLUE}• Vector DB:{RESET}  ChromaDB collection '{Config.CHROMA_COLLECTION_NAME}'\n")
 
@@ -59,6 +68,9 @@ def clean_database(keep_standard_sops: bool = True, reindex_sops: bool = False):
         "review_decisions",
         "audit_events",
         "investigation_cases",
+        "m_chargebacks",
+        "m_payments",
+        "m_orders",
         "chargebacks",
         "payments",
         "orders",
@@ -66,6 +78,7 @@ def clean_database(keep_standard_sops: bool = True, reindex_sops: bool = False):
 
     # Tables that MUST NEVER be deleted
     PRESERVED_TABLES = [
+        ("m_users", "Master Domain Users (m_users)"),
         ("users", "Customer & Merchant Domain Users"),
         ("app_users", "System Personas / Login Accounts"),
         ("fraud_parameters", "Detection Parameter Thresholds (6 Sections)"),
@@ -117,7 +130,6 @@ def clean_database(keep_standard_sops: bool = True, reindex_sops: bool = False):
 
             # Handle policy_documents
             if keep_standard_sops:
-                # Keep standard 5 SOPs (FRAUD_SOP_01 to FRAUD_SOP_05), delete any custom uploaded policies
                 try:
                     deleted_custom = db.session.execute(
                         text("DELETE FROM `policy_documents` WHERE `document_key` NOT IN ('FRAUD_SOP_01', 'FRAUD_SOP_02', 'FRAUD_SOP_03', 'FRAUD_SOP_04', 'FRAUD_SOP_05')")
@@ -141,7 +153,6 @@ def clean_database(keep_standard_sops: bool = True, reindex_sops: bool = False):
         except Exception as e:
             db.session.rollback()
             print(f"  {RED}✘ Error during MySQL cleanup: {e}{RESET}")
-            # Ensure foreign key checks are re-enabled
             try:
                 db.session.execute(text("SET FOREIGN_KEY_CHECKS = 1;"))
                 db.session.commit()
@@ -176,14 +187,11 @@ def clean_database(keep_standard_sops: bool = True, reindex_sops: bool = False):
             collection = client.get_collection(name=Config.CHROMA_COLLECTION_NAME)
             chroma_before = collection.count()
             print(f"  Found collection `{Config.CHROMA_COLLECTION_NAME}` with {chroma_before} vector embeddings.")
-
-            # Delete the collection to completely flush vectors and index files
             client.delete_collection(name=Config.CHROMA_COLLECTION_NAME)
             print(f"  {GREEN}✔{RESET} Deleted ChromaDB collection `{Config.CHROMA_COLLECTION_NAME}`.")
         except Exception:
             print(f"  Collection `{Config.CHROMA_COLLECTION_NAME}` was not found or was already empty.")
 
-        # Re-create fresh, empty collection
         new_col = client.create_collection(
             name=Config.CHROMA_COLLECTION_NAME,
             metadata={"description": "Approved organizational policies for fraud investigation"}
@@ -192,14 +200,13 @@ def clean_database(keep_standard_sops: bool = True, reindex_sops: bool = False):
         print(f"  {GREEN}✔{RESET} Re-created fresh empty collection `{Config.CHROMA_COLLECTION_NAME}` (Vectors: {chroma_after})")
         report.append(("ChromaDB Vector Embeddings", chroma_before, chroma_before, chroma_after, "CLEANED"))
 
-        # Optional re-index of standard SOPs
         if reindex_sops:
             print(f"\n  {CYAN}Re-indexing 5 standard SOP policies into ChromaDB...{RESET}")
-            from backend.app.services.seed_data import seed_default_sop_policies
+            from app.services.seed_data import seed_default_sop_policies
             with app.app_context():
                 seed_default_sop_policies()
-                from backend.app.services.rag_service import PolicyRAGService
-                from backend.app.models.governance import PolicyDocument
+                from app.services.rag_service import PolicyRAGService
+                from app.models.governance import PolicyDocument
                 sops = PolicyDocument.query.all()
                 for p in sops:
                     PolicyRAGService.ingest_policy(
@@ -245,24 +252,11 @@ def main():
     parser = argparse.ArgumentParser(
         description="Clean MySQL database tables and ChromaDB vector store while preserving users and fraud parameters."
     )
-    parser.add_argument(
-        "--yes", "-y",
-        action="store_true",
-        help="Skip interactive confirmation prompt and proceed immediately."
-    )
-    parser.add_argument(
-        "--clean-all-sops",
-        action="store_true",
-        help="Also delete the 5 standard company SOPs (by default, standard SOPs are kept and only custom uploads are deleted)."
-    )
-    parser.add_argument(
-        "--reindex-sops",
-        action="store_true",
-        help="Re-index the 5 standard company SOPs into ChromaDB after clearing vectors."
-    )
+    parser.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt.")
+    parser.add_argument("--clean-all-sops", action="store_true", help="Also delete the 5 standard company SOPs.")
+    parser.add_argument("--reindex-sops", action="store_true", help="Re-index standard SOPs into ChromaDB.")
 
     args = parser.parse_args()
-
     print_banner()
 
     if not args.yes:

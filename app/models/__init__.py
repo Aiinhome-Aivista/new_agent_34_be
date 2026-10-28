@@ -1,11 +1,14 @@
-from app.models.source_domain import User, Order, Payment, Chargeback
+from app.models.source_domain import (
+    User, Order, Payment, Chargeback,
+    MUser, MOrder, MPayment, MChargeback
+)
 from app.models.investigation import (
     InvestigationCase, CaseEvidence, InvestigationRun,
     Recommendation, RecommendationEvidence
 )
 from app.models.governance import (
-    AppUser, PolicyDocument, ReviewDecision, ActionRequest,
-    AuditEvent, IntegrationConfig
+    AppUser, PolicyDocument, FraudParameter, ReviewDecision,
+    ActionRequest, AuditEvent, IntegrationConfig
 )
 
 __all__ = [
@@ -13,6 +16,10 @@ __all__ = [
     "Order",
     "Payment",
     "Chargeback",
+    "MUser",
+    "MOrder",
+    "MPayment",
+    "MChargeback",
     "InvestigationCase",
     "CaseEvidence",
     "InvestigationRun",
@@ -26,4 +33,3 @@ __all__ = [
     "AuditEvent",
     "IntegrationConfig",
 ]
-
