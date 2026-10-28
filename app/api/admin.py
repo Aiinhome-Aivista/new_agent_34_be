@@ -1,3 +1,4 @@
+import json
 import logging
 import uuid
 from flask import Blueprint, request, jsonify
@@ -233,10 +234,16 @@ from app.services.knowledge_service import KnowledgeService
 from app.services.rag_service import PolicyRAGService
 
 @admin_bp.route("/knowledge/upload", methods=["POST"])
+<<<<<<< HEAD
 def upload_knowledge_document():    
+=======
+@admin_bp.route("/knowledge/upload-stream", methods=["POST"])
+def upload_knowledge_document():
+>>>>>>> 33518c569e34a45f1ffd7716c5a188f8b1316bcc
     """
     Uploads a private company policy document (.pdf, .txt, .md, .json),
     extracts text, chunks it, and indexes it into ChromaDB vector knowledge store.
+    Supports real-time SSE progress streaming when stream=true or when calling /knowledge/upload-stream.
     """
     if "file" not in request.files:
         return jsonify({"error": "Bad Request", "message": "No file uploaded in form"}), 400
@@ -255,8 +262,39 @@ def upload_knowledge_document():
     if not document_key or not title:
         return jsonify({"error": "Bad Request", "message": "document_key and title are required"}), 400
 
+    stream_mode = (
+        request.path.endswith("/knowledge/upload-stream") or
+        request.args.get("stream", "false").lower() == "true" or
+        "text/event-stream" in request.headers.get("Accept", "")
+    )
+
     try:
         content_bytes = doc_file.read()
+        if stream_mode:
+            def generate():
+                for step in KnowledgeService.process_and_index_document_stream(
+                    file_bytes=content_bytes,
+                    filename=doc_file.filename,
+                    document_key=document_key,
+                    title=title,
+                    category=category,
+                    action_impact=action_impact,
+                    version=version,
+                    description=description
+                ):
+                    yield f"data: {json.dumps(step)}\n\n"
+
+            return Response(
+                stream_with_context(generate()),
+                mimetype="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                    "Connection": "keep-alive",
+                    "Access-Control-Allow-Origin": "*"
+                }
+            )
+
         res = KnowledgeService.process_and_index_document(
             file_bytes=content_bytes,
             filename=doc_file.filename,
