@@ -234,12 +234,8 @@ from app.services.knowledge_service import KnowledgeService
 from app.services.rag_service import PolicyRAGService
 
 @admin_bp.route("/knowledge/upload", methods=["POST"])
-<<<<<<< HEAD
-def upload_knowledge_document():    
-=======
 @admin_bp.route("/knowledge/upload-stream", methods=["POST"])
 def upload_knowledge_document():
->>>>>>> 33518c569e34a45f1ffd7716c5a188f8b1316bcc
     """
     Uploads a private company policy document (.pdf, .txt, .md, .json),
     extracts text, chunks it, and indexes it into ChromaDB vector knowledge store.
