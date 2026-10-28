@@ -24,8 +24,8 @@ def create_app(config_class=Config):
     init_redis(app)
 
     # Initialize Swagger UI documentation
-    from app.api.swagger_config import init_swagger
-    init_swagger(app)
+    # from app.api.swagger_config import init_swagger
+    # init_swagger(app)
 
     # Register blueprints
     from app.api.health import health_bp
