@@ -1,3 +1,4 @@
+from app.models.investigation import CaseEvidence
 from app.models.governance import AppUser
 import os
 import uuid
