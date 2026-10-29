@@ -1,3 +1,4 @@
+from app.models.source_domain import MUser
 import uuid
 import logging
 from datetime import datetime, timezone
@@ -25,6 +26,13 @@ class ActionService:
     ) -> Dict[str, Any]:
         """
         Executes an action following state revalidation and idempotency verification.
+        Supports:
+          - LOCK_USER: Sets m_users.status = 'BLOCKED', case status = 'ACTION_AUTHORIZED'
+          - UNLOCK_USER: Sets m_users.status = 'ACTIVE', case status = 'RESOLVED'
+          - REQUEST_EVIDENCE: Case status = 'COLLECTING_EVIDENCE'
+          - ESCALATE: Case status = 'ESCALATED'
+          - MONITOR: Case status = 'MONITORING'
+          - Legacy actions: BLOCK_USER, HOLD_TRANSACTION, NO_ACTION, etc.
         """
         # 1. Idempotency check
         existing_action = ActionRequest.query.filter_by(idempotency_key=idempotency_key).first()
@@ -60,35 +68,70 @@ class ActionService:
         db.session.add(action_req)
         db.session.commit()
 
-        # 3. Perform execution (simulated downstream gateway call with real confirmation reference)
+        # 3. Perform execution
         try:
             downstream_ref = f"DN-TX-{uuid.uuid4().hex[:12].upper()}"
             action_req.execution_status = "COMPLETED"
             action_req.downstream_reference = downstream_ref
             action_req.executed_at = datetime.now(timezone.utc)
 
-            # Update case status
-            if action_type in ["BLOCK_USER", "BLOCK_MERCHANT", "HOLD_TRANSACTION"]:
+            # Determine target user_id for domain mutation and audit trail
+            target_user_id = case.user_id_ref
+            if not target_user_id and target_reference and target_reference.startswith("USR_"):
+                target_user_id = target_reference
+
+            # Execute user status mutations in master table m_users
+            target_user = None
+            if target_user_id:
+                target_user = MUser.query.filter_by(user_id=target_user_id).first()
+
+            if action_type in ["LOCK_USER", "BLOCK_USER"]:
+                if target_user:
+                    target_user.status = "BLOCKED"
+                    target_user.updated_at = datetime.now(timezone.utc)
+                    logger.info(f"MUser {target_user_id} status updated to BLOCKED")
                 case.status = "ACTION_AUTHORIZED"
-            elif action_type == "NO_ACTION":
-                case.status = "CLOSED"
+
+            elif action_type == "UNLOCK_USER":
+                if target_user:
+                    target_user.status = "ACTIVE"
+                    target_user.updated_at = datetime.now(timezone.utc)
+                    logger.info(f"MUser {target_user_id} status updated to ACTIVE")
+                case.status = "RESOLVED"
+
+            elif action_type == "REQUEST_EVIDENCE":
+                case.status = "COLLECTING_EVIDENCE"
+
             elif action_type == "ESCALATE":
                 case.status = "ESCALATED"
 
+            elif action_type == "MONITOR":
+                case.status = "MONITORING"
+
+            elif action_type in ["HOLD_TRANSACTION", "TEMPORARY_RESTRICTION", "BLOCK_MERCHANT"]:
+                case.status = "ACTION_AUTHORIZED"
+
+            elif action_type in ["NO_ACTION", "DISMISS"]:
+                case.status = "CLOSED"
+
             db.session.commit()
 
-            # Record audit event
+            # Record audit event with explicit user_id and actor tracking
             AuditService.record_event(
                 event_type="ACTION_EXECUTED",
                 actor_type="ACTION_SERVICE",
                 correlation_id=idempotency_key,
                 case_id=case_id,
+                user_id=target_user_id,
                 actor_id=requested_by,
                 details={
                     "action_type": action_type,
                     "target": target_reference,
+                    "target_user_id": target_user_id,
+                    "user_status_after": target_user.status if target_user else None,
                     "downstream_reference": downstream_ref,
-                    "execution_status": "COMPLETED"
+                    "execution_status": "COMPLETED",
+                    "policy_reference": policy_reference
                 }
             )
 

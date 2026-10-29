@@ -1,3 +1,4 @@
+from app.models import InvestigationCase
 import hashlib
 import json
 from datetime import datetime, timezone
@@ -15,18 +16,30 @@ class AuditService:
         correlation_id: str,
         case_id: Optional[str] = None,
         actor_id: Optional[str] = None,
-        details: Optional[Dict[str, Any]] = None
+        details: Optional[Dict[str, Any]] = None,
+        user_id: Optional[str] = None
     ) -> AuditEvent:
-        """Persists a new structured audit record with a deterministic hash."""
+        """Persists a new structured audit record with a deterministic hash and user_id tracking."""
         now = datetime.now(timezone.utc)
         sanitized_details = details or {}
-        
+
+        # Auto-resolve user_id from case if not explicitly provided
+        resolved_user_id = user_id
+        if not resolved_user_id and case_id:
+            try:
+                case = InvestigationCase.query.filter_by(id=case_id).first()
+                if case:
+                    resolved_user_id = case.user_id
+            except Exception:
+                pass
+
         # Calculate event fingerprint
-        payload_str = f"{case_id}:{actor_type}:{event_type}:{now.isoformat()}:{json.dumps(sanitized_details, sort_keys=True)}"
+        payload_str = f"{case_id}:{resolved_user_id}:{actor_type}:{event_type}:{now.isoformat()}:{json.dumps(sanitized_details, sort_keys=True)}"
         event_hash = hashlib.sha256(payload_str.encode("utf-8")).hexdigest()
 
         event = AuditEvent(
             case_id=case_id,
+            user_id=resolved_user_id,
             actor_type=actor_type,
             actor_id=actor_id,
             event_type=event_type,
