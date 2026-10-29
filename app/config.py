@@ -20,23 +20,42 @@ class Config:
 
     # Database
     MYSQL_USER: str = os.getenv("MYSQL_USER", "root")
-    MYSQL_PASSWORD: str = os.getenv("MYSQL_PASSWORD", "852456")
+    if MYSQL_USER.startswith("${") and MYSQL_USER.endswith("}"):
+        MYSQL_USER = "root"
+
+    MYSQL_PASSWORD: str = os.getenv("MYSQL_PASSWORD", "")
+    if MYSQL_PASSWORD.startswith("${") and MYSQL_PASSWORD.endswith("}"):
+        MYSQL_PASSWORD = ""
+
     MYSQL_HOST: str = os.getenv("MYSQL_HOST", "localhost")
-    MYSQL_PORT: int = int(os.getenv("MYSQL_PORT", "3306"))
+    if MYSQL_HOST.startswith("${") and MYSQL_HOST.endswith("}"):
+        MYSQL_HOST = "localhost"
+
+    _raw_mysql_port = os.getenv("MYSQL_PORT", "3306")
+    try:
+        MYSQL_PORT: int = int(_raw_mysql_port)
+    except (ValueError, TypeError):
+        MYSQL_PORT: int = 3306
+
     MYSQL_DB: str = os.getenv("MYSQL_DB", "fraud_investigation_db")
+    if MYSQL_DB.startswith("${") and MYSQL_DB.endswith("}"):
+        MYSQL_DB = "fraud_investigation_db"
     
     # Default MySQL URL with automatic URL-encoding protection for passwords containing '@'
     _encoded_pwd = quote_plus(MYSQL_PASSWORD)
-    _raw_db_url = os.getenv(
-        "DATABASE_URL",
-        f"mysql+pymysql://{MYSQL_USER}:{_encoded_pwd}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}?charset=utf8mb4"
-    )
-    if _raw_db_url.count("@") > 1 and "://" in _raw_db_url:
+    _constructed_url = f"mysql+pymysql://{MYSQL_USER}:{_encoded_pwd}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}?charset=utf8mb4"
+    _raw_db_url = os.getenv("DATABASE_URL", "").strip()
+
+    # If DATABASE_URL is missing, empty, or contains unexpanded '${...}' template variables (e.g. from Docker --env-file)
+    if not _raw_db_url or "${" in _raw_db_url:
+        _raw_db_url = _constructed_url
+    elif _raw_db_url.count("@") > 1 and "://" in _raw_db_url:
         _prefix, _remainder = _raw_db_url.split("://", 1)
         _creds, _host = _remainder.rsplit("@", 1)
         if ":" in _creds:
             _u, _p = _creds.split(":", 1)
             _raw_db_url = f"{_prefix}://{_u}:{quote_plus(_p)}@{_host}"
+            
     SQLALCHEMY_DATABASE_URI: str = _raw_db_url
     SQLALCHEMY_TRACK_MODIFICATIONS: bool = False
     SQLALCHEMY_ENGINE_OPTIONS = {
@@ -48,9 +67,25 @@ class Config:
 
     # Redis
     REDIS_HOST: str = os.getenv("REDIS_HOST", "localhost")
-    REDIS_PORT: int = int(os.getenv("REDIS_PORT", "6379"))
-    REDIS_DB: int = int(os.getenv("REDIS_DB", "0"))
-    REDIS_URL: str = os.getenv("REDIS_URL", f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}")
+    if REDIS_HOST.startswith("${") and REDIS_HOST.endswith("}"):
+        REDIS_HOST = "localhost"
+
+    _raw_redis_port = os.getenv("REDIS_PORT", "6379")
+    try:
+        REDIS_PORT: int = int(_raw_redis_port)
+    except (ValueError, TypeError):
+        REDIS_PORT: int = 6379
+
+    _raw_redis_db = os.getenv("REDIS_DB", "0")
+    try:
+        REDIS_DB: int = int(_raw_redis_db)
+    except (ValueError, TypeError):
+        REDIS_DB: int = 0
+
+    _raw_redis_url = os.getenv("REDIS_URL", "").strip()
+    if not _raw_redis_url or "${" in _raw_redis_url:
+        _raw_redis_url = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
+    REDIS_URL: str = _raw_redis_url
     IDEMPOTENCY_TTL_SECONDS: int = int(os.getenv("IDEMPOTENCY_TTL_SECONDS", "86400"))
 
     # ChromaDB
@@ -108,4 +143,3 @@ class Config:
     AUTO_TRIGGER_ENABLED: bool = os.getenv("AUTO_TRIGGER_ENABLED", "true").lower() == "true"
     TRIGGER_POLL_INTERVAL_SECONDS: int = int(os.getenv("TRIGGER_POLL_INTERVAL_SECONDS", "30"))
     EXCEL_INGEST_WATCH_DIR: str = os.getenv("EXCEL_INGEST_WATCH_DIR", "./data/incoming_excel")
-
