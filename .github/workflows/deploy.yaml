@@ -102,6 +102,8 @@ jobs:
               --name ${{ env.CONTAINER_NAME }} \
               --restart unless-stopped \
               -p ${{ env.PORT }}:${{ env.PORT }} \
+              -e PORT=${{ env.PORT }} \
+              -e FLASK_PORT=${{ env.PORT }} \
               --env-file /root/Phase-2/AGENT_34/new_agent_34_BE/.env \
               ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:deploy-1
 
