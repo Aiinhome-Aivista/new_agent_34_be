@@ -206,6 +206,7 @@ class AuditEvent(db.Model):
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
     case_id = Column(String(36), ForeignKey("investigation_cases.id"), nullable=True)
+    user_id = Column(String(36), nullable=True, index=True)
     actor_type = Column(String(50), nullable=False)  # 'SYSTEM_TRIGGER', 'AGENT_WORKFLOW', 'HUMAN_REVIEWER', 'ACTION_SERVICE'
     actor_id = Column(String(100), nullable=True)
     event_type = Column(String(100), nullable=False) # 'TRIGGER_RECEIVED', 'EVIDENCE_COLLECTED', 'RECOMMENDATION_GENERATED', 'DECISION_SUBMITTED', 'ACTION_EXECUTED'
@@ -216,6 +217,7 @@ class AuditEvent(db.Model):
 
     __table_args__ = (
         Index("idx_audit_case_time", "case_id", "event_timestamp"),
+        Index("idx_audit_user_time", "user_id", "event_timestamp"),
         Index("idx_audit_event_type", "event_type"),
     )
 
@@ -223,6 +225,7 @@ class AuditEvent(db.Model):
         return {
             "id": self.id,
             "case_id": self.case_id,
+            "user_id": self.user_id,
             "actor_type": self.actor_type,
             "actor_id": self.actor_id,
             "event_type": self.event_type,

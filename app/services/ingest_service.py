@@ -11,7 +11,7 @@ from typing import Dict, Any, List, Optional
 
 from backend.app.extensions import db
 from backend.app.config import Config
-from backend.app.models.source_domain import User, Order, Payment, Chargeback
+from backend.app.models.source_domain import MUser, MOrder, MPayment, MChargeback
 from backend.app.schemas.trigger import TriggerRequest
 from backend.app.services.case_service import CaseService
 from backend.app.agent.graph import execute_case_investigation
@@ -22,13 +22,31 @@ def utc_now():
     return datetime.now(timezone.utc)
 
 class IngestService:
-    """Processes batch transaction records from Excel/CSV and auto-triggers fraud investigations."""
+    """
+    Microservice-pattern batch ingestion service.
+    Accepts simplified 3-4 column CSV/Excel files (user_id, user_name, email, reason).
+    Resolves users against master tables (m_users, m_orders, m_payments, m_chargebacks)
+    and triggers LangGraph fraud investigations.
+    """
+
+    USER_ID_ALIASES = {"user_id", "userid", "customer_id", "id", "account_id", "user"}
+    NAME_ALIASES = {"user_name", "username", "name", "customer_name", "full_name"}
+    EMAIL_ALIASES = {"email", "email_address", "user_email", "mail"}
+    REASON_ALIASES = {"reason", "trigger_reason", "investigation_reason", "notes", "description"}
+
+    @classmethod
+    def _extract_column(cls, row: Dict[str, str], aliases: set) -> Optional[str]:
+        for k, v in row.items():
+            if k in aliases and v:
+                return v.strip()
+        return None
 
     @classmethod
     def parse_and_ingest_stream(cls, file_content: bytes, filename: str, auto_investigate: bool = True):
         """
-        Generator that parses Excel/CSV file content, updates database records,
-        triggers investigations, and yields real-time progress events for each row.
+        Generator that parses 3-4 column Excel/CSV file content, resolves users against
+        m_users/m_orders/m_payments/m_chargebacks, auto-provisions missing users,
+        triggers investigations, and yields real-time SSE progress events.
         """
         rows = []
         is_excel = filename.lower().endswith(".xlsx") or filename.lower().endswith(".xls")
@@ -83,7 +101,7 @@ class IngestService:
         yield {
             "event": "start",
             "status": "PROCESSING",
-            "message": f"Parsed {total_rows} records from {filename}. Starting batch ingestion...",
+            "message": f"Parsed {total_rows} user records from {filename}. Resolving against m_* master tables...",
             "total_rows": total_rows,
             "current": 0,
             "total": total_rows,
@@ -97,8 +115,23 @@ class IngestService:
         for idx, row in enumerate(rows):
             current_num = idx + 1
             percent = min(95, round(5 + (current_num / total_rows) * 90))
-            user_id = row.get("user_id") or row.get("customer_id") or f"USR_{uuid.uuid4().hex[:8].upper()}"
-            payment_id = row.get("payment_id") or row.get("transaction_id") or f"PAY_{uuid.uuid4().hex[:10].upper()}"
+
+            raw_user_id = cls._extract_column(row, cls.USER_ID_ALIASES)
+            raw_email = cls._extract_column(row, cls.EMAIL_ALIASES)
+            raw_name = cls._extract_column(row, cls.NAME_ALIASES)
+            raw_reason = cls._extract_column(row, cls.REASON_ALIASES)
+
+            if not raw_user_id and not raw_email:
+                yield {
+                    "event": "row_error",
+                    "status": "PROCESSING",
+                    "current": current_num,
+                    "total": total_rows,
+                    "percent": percent,
+                    "error": "Row missing both user_id and email identifier",
+                    "message": f"Row {current_num} skipped: missing both user_id and email"
+                }
+                continue
 
             yield {
                 "event": "row_start",
@@ -106,136 +139,160 @@ class IngestService:
                 "current": current_num,
                 "total": total_rows,
                 "percent": percent,
-                "item_id": payment_id,
-                "user_id": user_id,
-                "message": f"Processing record {current_num} of {total_rows}: {payment_id} ({user_id})..."
+                "item_id": raw_user_id or raw_email,
+                "user_id": raw_user_id or raw_email,
+                "message": f"Resolving user {raw_user_id or raw_email} against m_users master table..."
             }
 
             try:
-                # 1. Normalize User / Customer
-                user = User.query.filter_by(user_id=user_id).first()
+                # 1. Resolve User from m_users (by user_id first, then email fallback)
+                user = None
+                if raw_user_id:
+                    user = MUser.query.filter_by(user_id=raw_user_id).first()
+                if not user and raw_email:
+                    user = MUser.query.filter_by(email=raw_email).first()
+
+                is_provisioned = False
                 if not user:
-                    user = User(
-                        user_id=user_id,
-                        email=row.get("email") or f"{user_id.lower()}@customer.com",
-                        first_name=row.get("first_name", "Customer"),
-                        last_name=row.get("last_name", f"User_{idx+1}"),
-                        phone_number=row.get("phone_number", "+919876543210"),
+                    # Auto-provision customer in m_users if not found
+                    new_uid = raw_user_id or f"USR_{uuid.uuid4().hex[:8].upper()}"
+                    new_email = raw_email or f"{new_uid.lower()}@customer.com"
+                    names = (raw_name or "New Customer").strip().split(" ", 1)
+                    fname = names[0]
+                    lname = names[1] if len(names) > 1 else "User"
+
+                    is_suspicious_reason = any(
+                        term in (raw_reason or "").lower()
+                        for term in ["fraud", "suspicious", "stolen", "decline", "emulator", "ring", "chargeback", "compromise"]
+                    )
+
+                    user = MUser(
+                        user_id=new_uid,
+                        external_user_id=f"EXT_{new_uid}",
+                        first_name=fname,
+                        last_name=lname,
+                        email=new_email,
+                        phone_number="+919876543210",
                         user_type="CUSTOMER",
                         status="ACTIVE",
-                        country_code=row.get("country_code", "IN")[:2].upper(),
-                        kyc_status=row.get("kyc_status", "PENDING").upper(),
-                        risk_level=row.get("risk_level", "LOW").upper(),
-                        risk_score=float(row.get("risk_score", 15.0)),
+                        country_code="IN",
+                        kyc_status="PENDING",
+                        risk_level="HIGH" if is_suspicious_reason else "MEDIUM",
+                        risk_score=78.0 if is_suspicious_reason else 30.0,
                         created_at=utc_now()
                     )
                     db.session.add(user)
-                else:
-                    if row.get("kyc_status"):
-                        user.kyc_status = row.get("kyc_status").upper()
-                    if row.get("risk_level"):
-                        user.risk_level = row.get("risk_level").upper()
+                    db.session.commit()
+                    is_provisioned = True
+                    logger.info(f"Auto-provisioned new user in m_users: {user.user_id} ({user.email})")
 
-                # 2. Normalize Merchant
-                merchant_id = row.get("merchant_id") or "MERCH_PRIME_01"
-                merchant = User.query.filter_by(user_id=merchant_id, user_type="MERCHANT").first()
-                if not merchant:
-                    merchant = User(
-                        user_id=merchant_id,
-                        email=f"{merchant_id.lower()}@merchant.com",
-                        first_name="Merchant",
-                        last_name=merchant_id,
-                        user_type="MERCHANT",
-                        status="ACTIVE",
-                        country_code="IN",
-                        kyc_status="VERIFIED",
-                        risk_level="LOW",
+                # 2. Fetch linked data from m_orders, m_payments, m_chargebacks
+                linked_orders = MOrder.query.filter_by(user_id=user.user_id).order_by(MOrder.created_at.desc()).all()
+                linked_payments = MPayment.query.filter_by(user_id=user.user_id).order_by(MPayment.initiated_at.desc()).all()
+                payment_ids = [p.payment_id for p in linked_payments]
+                linked_chargebacks = (
+                    MChargeback.query.filter(MChargeback.payment_id.in_(payment_ids)).all()
+                    if payment_ids else []
+                )
+
+                # 3. Ensure baseline order & payment exist if newly provisioned or empty history
+                if not linked_payments:
+                    default_merchant = MUser.query.filter_by(user_type="MERCHANT").first()
+                    merch_id = default_merchant.user_id if default_merchant else "MERCH_PRIME_01"
+                    if not default_merchant:
+                        default_merchant = MUser(
+                            user_id=merch_id,
+                            email="prime.retail@merchant.com",
+                            first_name="Prime",
+                            last_name="Retail Ltd",
+                            user_type="MERCHANT",
+                            status="ACTIVE",
+                            country_code="IN",
+                            kyc_status="VERIFIED",
+                            risk_level="LOW",
+                            created_at=utc_now()
+                        )
+                        db.session.add(default_merchant)
+
+                    base_ord_id = f"ORD_{uuid.uuid4().hex[:8].upper()}"
+                    base_pay_id = f"PAY_{uuid.uuid4().hex[:8].upper()}"
+                    new_order = MOrder(
+                        order_id=base_ord_id,
+                        user_id=user.user_id,
+                        merchant_id=merch_id,
+                        amount=15000.0,
+                        currency="INR",
+                        order_status="PAID",
+                        ip_address="103.21.144.12",
+                        device_id=f"DEV_{uuid.uuid4().hex[:8].upper()}",
+                        billing_country=user.country_code or "IN",
+                        shipping_country=user.country_code or "IN",
                         created_at=utc_now()
                     )
-                    db.session.add(merchant)
+                    db.session.add(new_order)
 
-                # 3. Normalize Order
-                order_id = row.get("order_id") or f"ORD_{uuid.uuid4().hex[:10].upper()}"
-                order = Order.query.filter_by(order_id=order_id).first()
-                amount_val = float(row.get("amount") or 4500.0)
-                currency_val = (row.get("currency") or "INR")[:3].upper()
-
-                if not order:
-                    order = Order(
-                        order_id=order_id,
+                    new_payment = MPayment(
+                        payment_id=base_pay_id,
+                        order_id=base_ord_id,
                         user_id=user.user_id,
-                        merchant_id=merchant.user_id,
-                        amount=amount_val,
-                        currency=currency_val,
-                        order_status=row.get("order_status", "PAID").upper(),
-                        ip_address=row.get("ip_address", "192.168.1.50"),
-                        device_id=row.get("device_id", f"DEV_{uuid.uuid4().hex[:8].upper()}"),
-                        billing_country=row.get("billing_country", "IN")[:2].upper(),
-                        shipping_country=row.get("shipping_country", "IN")[:2].upper(),
-                        created_at=utc_now()
-                    )
-                    db.session.add(order)
-
-                # 4. Normalize Payment
-                payment = Payment.query.filter_by(payment_id=payment_id).first()
-                if not payment:
-                    payment = Payment(
-                        payment_id=payment_id,
-                        order_id=order.order_id,
-                        user_id=user.user_id,
-                        merchant_id=merchant.user_id,
-                        payment_method=row.get("payment_method", "CARD").upper(),
-                        payment_status=row.get("payment_status", "AUTHORIZED").upper(),
-                        amount=amount_val,
-                        currency=currency_val,
-                        gateway_transaction_id=f"GW_{payment_id}",
-                        ip_address=order.ip_address,
-                        device_id=order.device_id,
-                        failure_code=row.get("failure_code") or None,
-                        failure_reason=row.get("failure_reason") or None,
+                        merchant_id=merch_id,
+                        payment_method="CARD",
+                        payment_status="AUTHORIZED",
+                        amount=15000.0,
+                        currency="INR",
+                        gateway_transaction_id=f"GW_{base_pay_id}",
+                        ip_address=new_order.ip_address,
+                        device_id=new_order.device_id,
                         initiated_at=utc_now()
                     )
-                    db.session.add(payment)
+                    db.session.add(new_payment)
+                    db.session.commit()
 
-                # 5. Optional Chargeback
-                dispute_count = int(row.get("dispute_count", 0)) if row.get("dispute_count") else 0
-                if dispute_count > 0 or row.get("has_chargeback", "").lower() in ["true", "1", "yes"]:
-                    chargeback_id = f"CBK_{uuid.uuid4().hex[:8].upper()}"
-                    cb = Chargeback(
-                        chargeback_id=chargeback_id,
-                        payment_id=payment.payment_id,
-                        order_id=order.order_id,
-                        amount=amount_val,
-                        currency=currency_val,
-                        reason_code=row.get("chargeback_reason", "FRAUDULENT_TRANSACTION"),
-                        chargeback_status="OPEN",
-                        fraud_indicator=True,
-                        received_at=utc_now()
-                    )
-                    db.session.add(cb)
+                    target_tx_id = base_pay_id
+                    target_merch_id = merch_id
+                    orders_count = 1
+                    payments_count = 1
+                else:
+                    target_tx_id = linked_payments[0].payment_id
+                    target_merch_id = linked_payments[0].merchant_id
+                    orders_count = len(linked_orders)
+                    payments_count = len(linked_payments)
 
-                db.session.commit()
+                chargebacks_count = len(linked_chargebacks)
                 ingested_count += 1
+
+                # 4. Compute Dynamic Priority based on master domain state & policy signals
+                is_high_risk = (
+                    user.risk_level == "HIGH" or
+                    user.kyc_status in ["REJECTED", "NOT_STARTED"] or
+                    chargebacks_count > 0 or
+                    (user.risk_score and float(user.risk_score) >= 70.0) or
+                    any(term in (raw_reason or "").lower() for term in ["fraud", "suspicious", "stolen", "decline", "emulator", "ring", "chargeback"])
+                )
+                priority = "HIGH" if is_high_risk else "MEDIUM"
+
+                # 5. Enrich Trigger Reason with Master Tables Evidence Context
+                base_reason = raw_reason.strip() if raw_reason else "Batch Ingestion User Audit"
+                user_display = f"{user.first_name or ''} {user.last_name or ''}".strip() or user.user_id
+                enriched_reason = (
+                    f"{base_reason} | Target: {user.user_id} ({user_display}) | "
+                    f"KYC: {user.kyc_status} | Risk Level: {user.risk_level} (Score: {user.risk_score or 0}) | "
+                    f"Domain Profile: {orders_count} orders, {payments_count} payments, {chargebacks_count} disputes"
+                )
 
                 # 6. Auto-Trigger Fraud Investigation Agent
                 case_summary = None
                 if auto_investigate:
-                    trigger_reason = (
-                        row.get("trigger_reason") or
-                        f"Batch Ingestion: Transaction {payment.payment_id} for user {user.user_id} (Amount: {currency_val} {amount_val})"
-                    )
-                    priority = "HIGH" if amount_val > 50000 or dispute_count > 0 else "MEDIUM"
-                    idempotency_key = f"INGEST_{payment.payment_id}_{int(time.time())}"
-
+                    idempotency_key = f"USER_INGEST_{user.user_id}_{int(time.time())}"
                     trigger_req = TriggerRequest(
                         trigger_type="TRANSACTION_INVESTIGATION",
-                        trigger_source="EXCEL_BATCH_INGESTOR",
-                        trigger_reason=trigger_reason,
+                        trigger_source="USER_BATCH_INGESTOR",
+                        trigger_reason=enriched_reason,
                         priority=priority,
                         idempotency_key=idempotency_key,
-                        transaction_id=payment.payment_id,
+                        transaction_id=target_tx_id,
                         user_id=user.user_id,
-                        merchant_id=merchant.user_id
+                        merchant_id=target_merch_id
                     )
 
                     case, is_dup = CaseService.process_trigger(trigger_req)
@@ -243,34 +300,40 @@ class IngestService:
                         try:
                             execute_case_investigation(case.id)
                         except Exception as inv_err:
-                            logger.error(f"Error during batch case investigation {case.id}: {inv_err}")
+                            logger.error(f"Error executing case investigation {case.id}: {inv_err}")
 
-                    # Refresh case data
                     db.session.refresh(case)
                     rec = case.recommendations[-1] if case.recommendations else None
                     case_summary = {
                         "case_id": case.id,
-                        "transaction_id": payment.payment_id,
+                        "transaction_id": target_tx_id,
                         "user_id": user.user_id,
+                        "user_name": user_display,
+                        "email": user.email,
                         "status": case.status,
                         "priority": case.priority,
                         "assessment": rec.assessment if rec else "PENDING",
                         "recommendation": rec.recommendation_type if rec else "PENDING",
                         "explanation": rec.explanation if rec else "Investigation in progress",
-                        "created_at": case.created_at.isoformat()
+                        "created_at": case.created_at.isoformat(),
+                        "orders_count": orders_count,
+                        "payments_count": payments_count,
+                        "chargebacks_count": chargebacks_count,
+                        "is_provisioned": is_provisioned
                     }
                     triggered_cases.append(case_summary)
 
+                prov_note = " (auto-provisioned)" if is_provisioned else ""
                 yield {
                     "event": "row_done",
                     "status": "PROCESSING",
                     "current": current_num,
                     "total": total_rows,
                     "percent": percent,
-                    "item_id": payment_id,
+                    "item_id": user.user_id,
                     "user_id": user.user_id,
                     "case": case_summary,
-                    "message": f"Processed record {current_num} of {total_rows}: {case_summary['assessment'] if case_summary else 'SAVED'}"
+                    "message": f"Processed user {user.user_id} ({user_display}){prov_note}: {case_summary['assessment'] if case_summary else 'SAVED'}"
                 }
 
             except Exception as row_err:
@@ -282,15 +345,15 @@ class IngestService:
                     "current": current_num,
                     "total": total_rows,
                     "percent": percent,
-                    "item_id": payment_id,
+                    "item_id": raw_user_id or raw_email or f"ROW_{current_num}",
                     "error": str(row_err),
-                    "message": f"Error on record {current_num}: {str(row_err)}"
+                    "message": f"Error on user row {current_num}: {str(row_err)}"
                 }
 
         yield {
             "event": "complete",
             "status": "SUCCESS",
-            "message": f"Processed {total_rows} records. Ingested {ingested_count} transactions and triggered {len(triggered_cases)} fraud investigations.",
+            "message": f"Successfully ingested {ingested_count} user records. Resolved against m_* tables and initiated {len(triggered_cases)} fraud investigations.",
             "total_rows": total_rows,
             "current": total_rows,
             "total": total_rows,
@@ -325,60 +388,60 @@ class IngestService:
 
     @classmethod
     def generate_sample_csv(cls) -> str:
-        """Generates a comprehensive sample CSV with mixed legitimate and fraud test scenarios."""
+        """
+        Generates clean 4-column sample CSV (user_id, user_name, email, reason)
+        matching the new microservice ingestion pattern.
+        """
         output = io.StringIO()
         writer = csv.writer(output)
+        writer.writerow(["user_id", "user_name", "email", "reason"])
+
+        # Row 1: Known Fraud Ring Member
         writer.writerow([
-            "user_id", "first_name", "last_name", "email", "phone_number",
-            "country_code", "kyc_status", "risk_level", "risk_score",
-            "merchant_id", "order_id", "payment_id", "amount", "currency",
-            "payment_method", "payment_status", "device_id", "ip_address",
-            "billing_country", "shipping_country", "dispute_count", "trigger_reason"
+            "USR_FRAUD_RING_01",
+            "Rajesh Kumar",
+            "rajesh.fraud@darkweb.net",
+            "Suspected member of organized emulator fraud ring"
         ])
 
-        # Row 1: Normal Legitimate User
+        # Row 2: KYC Pending with Velocity
         writer.writerow([
-            "USR_LEGIT_101", "Sourav", "Ganguly", "sourav.g@example.com", "+919830112233",
-            "IN", "VERIFIED", "LOW", "12.5",
-            "MERCH_PRIME_01", "ORD_NORMAL_801", "PAY_NORMAL_901", "3450", "INR",
-            "UPI", "CAPTURED", "DEV_IPHONE_15_A", "103.21.144.12",
-            "IN", "IN", "0", "Standard routine retail transaction check"
+            "USR_KYC_PENDING_02",
+            "Vikram Khanna",
+            "vikram.pending@tempmail.org",
+            "Unverified KYC profile with sudden high transaction velocity"
         ])
 
-        # Row 2: Card Velocity & High-Risk Failure Fraud
+        # Row 3: Verified VIP Customer (Legitimate)
         writer.writerow([
-            "USR_VELOCITY_102", "Alex", "Mercer", "alex.bin@darkweb.net", "+14155552671",
-            "US", "NOT_STARTED", "HIGH", "88.0",
-            "MERCH_PRIME_01", "ORD_TEST_802", "PAY_FAIL_902", "12500", "INR",
-            "CARD", "FAILED", "DEV_EMULATOR_CLONE_9", "45.142.120.10",
-            "US", "IN", "0", "Multiple consecutive card decline velocity detected"
+            "USR_VIP_LEGIT_03",
+            "Priya Sharma",
+            "priya.vip@example.com",
+            "Routine quarterly audit for verified high-value VIP customer"
         ])
 
-        # Row 3: High-Value KYC Unverified Fraud Attempt
+        # Row 4: Multiple Dispute Chargebacks
         writer.writerow([
-            "USR_UNVERIFIED_103", "Rohan", "Mehta", "rohan.unverified@tempmail.org", "+919876500112",
-            "IN", "PENDING", "HIGH", "75.0",
-            "MERCH_PRIME_01", "ORD_HIGHVAL_803", "PAY_HIGHVAL_903", "185000", "INR",
-            "NET_BANKING", "AUTHORIZED", "DEV_MACBOOK_PRO_M3", "103.45.67.89",
-            "IN", "IN", "0", "High-value INR 1,85,000 transfer from unverified KYC profile"
+            "USR_CHARGEBACK_06",
+            "Neha Gupta",
+            "neha.chargeback@dispute.org",
+            "Multiple dispute chargebacks flagged by acquiring bank"
         ])
 
-        # Row 4: Multi-Account Hardware Device Ring (Shared Device with Alex)
+        # Row 5: Account Takeover Victim
         writer.writerow([
-            "USR_SYBIL_RING_104", "Vikram", "Khanna", "vikram.sybil@proton.me", "+919811223344",
-            "IN", "PENDING", "HIGH", "82.0",
-            "MERCH_PRIME_01", "ORD_SYBIL_804", "PAY_SYBIL_904", "45000", "INR",
-            "CARD", "AUTHORIZED", "DEV_EMULATOR_CLONE_9", "45.142.120.10",
-            "IN", "IN", "0", "Hardware device fingerprint matches known multi-user emulator ring"
+            "USR_ATO_VICTIM_07",
+            "Amit Patel",
+            "amit.patel@corporate.in",
+            "Potential account takeover - anomalous device footprint and IP change"
         ])
 
-        # Row 5: Chargeback Dispute Spike Merchant/User
+        # Row 6: Dormant Account Spike
         writer.writerow([
-            "USR_DISPUTE_105", "Anita", "Deshmukh", "anita.disputes@gmail.com", "+919822334455",
-            "IN", "VERIFIED", "MEDIUM", "65.0",
-            "MERCH_PRIME_01", "ORD_DISPUTE_805", "PAY_DISPUTE_905", "28000", "INR",
-            "CARD", "AUTHORIZED", "DEV_ONEPLUS_12", "115.111.45.22",
-            "IN", "IN", "3", "Customer has 3 recorded active dispute chargebacks"
+            "USR_DORMANT_04",
+            "Sunil Rao",
+            "sunil.dormant@domain.com",
+            "Dormant account reactivation with rapid high-frequency checkouts"
         ])
 
         return output.getvalue()
