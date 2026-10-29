@@ -20,5 +20,5 @@ if __name__ == "__main__":
         except Exception as e:
             app.logger.warning(f"Could not automatically create tables at startup: {e}")
 
-    port = int(os.getenv("PORT") or os.getenv("FLASK_PORT", 3052))
+    port = int(os.getenv("PORT",3052) or os.getenv("FLASK_PORT", 3052))
     app.run(host="0.0.0.0", port=port, debug=app.config.get("DEBUG", False))
