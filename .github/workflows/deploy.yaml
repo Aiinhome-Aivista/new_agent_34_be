@@ -102,7 +102,7 @@ jobs:
               --name ${{ env.CONTAINER_NAME }} \
               --restart unless-stopped \
               -p ${{ env.PORT }}:${{ env.PORT }} \
-              --env-file /root/Phase-2/AGENT_15/new_agent_15_BE/.env \
+              --env-file /root/Phase-2/AGENT_34/new_agent_34_BE/.env \
               ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:deploy-1
 
             echo "Checking container status..."
