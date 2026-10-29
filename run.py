@@ -20,5 +20,13 @@ if __name__ == "__main__":
         except Exception as e:
             app.logger.warning(f"Could not automatically create tables at startup: {e}")
 
-    port = int(os.getenv("PORT",3052) or os.getenv("FLASK_PORT", 3052))
-    app.run(host="0.0.0.0", port=port, debug=app.config.get("DEBUG", False))
+    # Prioritize PORT or FLASK_PORT, defaulting to 3052 for production container
+    raw_port = os.getenv("PORT") or os.getenv("FLASK_PORT") or "3052"
+    try:
+        port = int(raw_port)
+    except (ValueError, TypeError):
+        port = 3052
+
+    debug = os.getenv("FLASK_DEBUG", "0").lower() in ("1", "true")
+    app.logger.info(f"Starting FraudOps Backend on 0.0.0.0:{port} (debug={debug})")
+    app.run(host="0.0.0.0", port=port, debug=debug)

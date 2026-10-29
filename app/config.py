@@ -16,7 +16,7 @@ class Config:
     FLASK_ENV: str = os.getenv("FLASK_ENV", "development")
     DEBUG: bool = FLASK_ENV == "development"
     SECRET_KEY: str = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
-    FLASK_PORT: int = int(os.getenv("FLASK_PORT", "5000"))
+    FLASK_PORT: int = int(os.getenv("PORT") or os.getenv("FLASK_PORT", "3052"))
 
     # Database
     MYSQL_USER: str = os.getenv("MYSQL_USER", "root")

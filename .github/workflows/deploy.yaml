@@ -96,20 +96,41 @@ jobs:
 
             docker rm ${{ env.CONTAINER_NAME }} || true
 
+            echo "Ensuring shared network exists..."
+
+            docker network create fraud-network || true
+
             echo "Starting new container..."
 
             docker run -d \
               --name ${{ env.CONTAINER_NAME }} \
               --restart unless-stopped \
+              --network fraud-network \
               -p ${{ env.PORT }}:${{ env.PORT }} \
+              --env-file /root/Phase-2/AGENT_34/new_agent_34_BE/.env \
               -e PORT=${{ env.PORT }} \
               -e FLASK_PORT=${{ env.PORT }} \
-              --env-file /root/Phase-2/AGENT_34/new_agent_34_BE/.env \
               ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:deploy-1
+
+            echo "Connecting frontend container to network if already running..."
+
+            docker network connect fraud-network new-agent-34-fe || true
+
+            echo "Waiting for backend initialization..."
+
+            sleep 5
 
             echo "Checking container status..."
 
-            docker ps --filter "name=${{ env.CONTAINER_NAME }}"
+            docker ps -a --filter "name=${{ env.CONTAINER_NAME }}"
+
+            echo "Container logs:"
+
+            docker logs --tail 50 ${{ env.CONTAINER_NAME }}
+
+            echo "Testing backend health from VPS..."
+
+            curl -i http://localhost:${{ env.PORT }}/api/v1/health || true
 
             echo "======================================"
             echo "Deployment completed successfully!"
