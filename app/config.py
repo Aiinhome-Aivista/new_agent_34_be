@@ -109,3 +109,14 @@ class Config:
     TRIGGER_POLL_INTERVAL_SECONDS: int = int(os.getenv("TRIGGER_POLL_INTERVAL_SECONDS", "30"))
     EXCEL_INGEST_WATCH_DIR: str = os.getenv("EXCEL_INGEST_WATCH_DIR", "./data/incoming_excel")
 
+    # ── SMTP Email Notifications ─────────────────────────────────────────────
+    SMTP_HOST: str = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
+    SMTP_USER: str = os.getenv("SMTP_USER", "")
+    SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
+    SMTP_FROM_EMAIL: str = os.getenv("SMTP_FROM_EMAIL", os.getenv("SMTP_USER", ""))
+    SMTP_USE_TLS: bool = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
+
+    # ── Frontend Base URL (For Customer Portal Links) ────────────────────────
+    FRONTEND_BASE_URL: str = os.getenv("FRONTEND_BASE_URL", "http://localhost:5173")
+

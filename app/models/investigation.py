@@ -50,6 +50,7 @@ class InvestigationCase(db.Model):
     recommendations = relationship("Recommendation", back_populates="case", cascade="all, delete-orphan")
     decisions = relationship("ReviewDecision", back_populates="case", cascade="all, delete-orphan")
     action_requests = relationship("ActionRequest", back_populates="case", cascade="all, delete-orphan")
+    evidence_requests = relationship("EvidenceRequestToken", back_populates="case", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("idx_cases_status_priority", "status", "priority"),
@@ -82,9 +83,9 @@ class CaseEvidence(db.Model):
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
     case_id = Column(String(36), ForeignKey("investigation_cases.id"), nullable=False)
-    evidence_type = Column(String(50), nullable=False)     # 'TRANSACTION', 'USER_PROFILE', 'CHARGEBACK_HISTORY', 'GRAPH_NETWORK', 'DEVICE_GEO'
-    source_system = Column(String(100), nullable=False)    # 'PAYMENT_CORE', 'KYC_SYSTEM', 'ARANGO_GRAPH', 'DEVICE_INTEL'
-    source_reference = Column(String(200), nullable=True) # E.g. Record ID or query identifier
+    evidence_type = Column(String(50), nullable=False)     # 'TRANSACTION', 'USER_PROFILE', 'USER_PORTAL_IMAGE', 'USER_PORTAL_DOCUMENT', etc.
+    source_system = Column(String(100), nullable=False)    # 'PAYMENT_CORE', 'CUSTOMER_EVIDENCE_PORTAL', etc.
+    source_reference = Column(String(200), nullable=True) # E.g. Record ID, filename, or query identifier
     retrieval_status = Column(String(30), nullable=False)  # 'COLLECTED', 'MISSING', 'UNAVAILABLE', 'FAILED'
     retrieved_at = Column(TIMESTAMP, default=utc_now, nullable=False)
     normalized_payload = Column(JSON, nullable=True)
@@ -192,4 +193,72 @@ class RecommendationEvidence(db.Model):
             "recommendation_id": self.recommendation_id,
             "evidence_id": self.evidence_id,
             "relationship_type": self.relationship_type,
+        }
+
+class EvidenceRequestToken(db.Model):
+    """Secure, time-bound tokens issued for customer-facing evidence submission."""
+    __tablename__ = "evidence_request_tokens"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    case_id = Column(String(36), ForeignKey("investigation_cases.id"), nullable=False)
+    user_id = Column(String(36), nullable=False, index=True)
+    token_hash = Column(String(64), unique=True, nullable=False, index=True)
+
+    requested_by = Column(String(100), nullable=False)
+    request_reason = Column(String(500), nullable=False)
+    requested_documents = Column(JSON, nullable=True)
+
+    # Lifecycle status: ISSUED, ACCESSED, VERIFIED, SUBMITTED, EXPIRED, REVOKED
+    status = Column(String(30), nullable=False, default="ISSUED")
+
+    otp_code_hash = Column(String(64), nullable=True)
+    otp_expires_at = Column(TIMESTAMP, nullable=True)
+    otp_attempts = Column(Integer, default=0, nullable=False)
+
+    access_count = Column(Integer, default=0, nullable=False)
+    last_accessed_at = Column(TIMESTAMP, nullable=True)
+    last_ip_address = Column(String(45), nullable=True)
+    user_agent = Column(String(300), nullable=True)
+
+    session_token_hash = Column(String(64), nullable=True)
+    session_expires_at = Column(TIMESTAMP, nullable=True)
+
+    expires_at = Column(TIMESTAMP, nullable=False)
+    submitted_at = Column(TIMESTAMP, nullable=True)
+    submission_payload = Column(JSON, nullable=True)
+
+    created_at = Column(TIMESTAMP, default=utc_now, nullable=False)
+    updated_at = Column(TIMESTAMP, default=utc_now, onupdate=utc_now, nullable=False)
+
+    case = relationship("InvestigationCase", back_populates="evidence_requests")
+
+    __table_args__ = (
+        Index("idx_evidence_tokens_status_exp", "status", "expires_at"),
+        Index("idx_evidence_tokens_case", "case_id"),
+        Index("idx_evidence_tokens_user", "user_id"),
+    )
+
+    def is_expired(self) -> bool:
+        now = datetime.now(timezone.utc)
+        if self.expires_at:
+            exp = self.expires_at if self.expires_at.tzinfo else self.expires_at.replace(tzinfo=timezone.utc)
+            return now > exp
+        return False
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "case_id": self.case_id,
+            "user_id": self.user_id,
+            "requested_by": self.requested_by,
+            "request_reason": self.request_reason,
+            "requested_documents": self.requested_documents or [],
+            "status": self.status,
+            "access_count": self.access_count,
+            "last_accessed_at": to_utc_iso(self.last_accessed_at),
+            "expires_at": to_utc_iso(self.expires_at),
+            "submitted_at": to_utc_iso(self.submitted_at),
+            "created_at": to_utc_iso(self.created_at),
+            "updated_at": to_utc_iso(self.updated_at),
+            "submission_payload": self.submission_payload,
         }
