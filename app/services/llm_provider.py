@@ -406,8 +406,7 @@ class LLMProviderFactory:
         elif active in ["custom", "mistral", "ollama", "local"]:
             return CustomLocalLLMProvider()
         else:
-            logger.warning(f"Unknown LLM provider '{active}', falling back to Custom/Local provider.")
-            return CustomLocalLLMProvider()
+            raise ValueError(f"Unknown or unsupported LLM provider '{active}'. Please configure a valid provider in .env.")
 
 
 class LLMReasoningService:
@@ -451,7 +450,10 @@ Required JSON Structure:
         evidence_items: List[Dict[str, Any]],
         graph_analysis: Dict[str, Any],
         retrieved_policies: List[Dict[str, Any]],
-        missing_evidence: List[str]
+        missing_evidence: List[str],
+        # Phase 3: Knowledgebase intelligence grounding inputs
+        rule_evaluation_results: Dict[str, Any] = None,
+        historical_patterns: List[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Executes LLM reasoning across configured provider with guaranteed fallback.
@@ -467,7 +469,9 @@ Required JSON Structure:
             evidence_items=evidence_items,
             graph_analysis=graph_analysis,
             retrieved_policies=retrieved_policies,
-            missing_evidence=missing_evidence
+            missing_evidence=missing_evidence,
+            rule_evaluation_results=rule_evaluation_results or {},
+            historical_patterns=historical_patterns or [],
         )
 
         try:
@@ -513,17 +517,11 @@ Required JSON Structure:
                     "model_name": model_tag
                 }
             else:
-                logger.warning(f"LLM response did not contain expected schema fields. Raw response: {raw_response[:200]}")
+                logger.error(f"LLM response did not contain expected schema fields. Raw response: {raw_response[:200] if raw_response else 'EMPTY'}")
+                raise ValueError("LLM response did not contain valid structured schema fields.")
         except Exception as e:
-            logger.warning(f"LLM Provider invocation failed or timed out ({provider.provider_name}): {e}. Applying evidence-grounded deterministic fallback.")
-
-        # Deterministic Grounded Fallback
-        return cls._deterministic_grounded_fallback(
-            evidence_items=evidence_items,
-            graph_analysis=graph_analysis,
-            missing_evidence=missing_evidence,
-            model_tag=f"{model_tag} (Fallback Engine)"
-        )
+            logger.error(f"LLM Provider invocation failed ({provider.provider_name}): {e}")
+            raise RuntimeError(f"LLM reasoning failed: {e}")
 
     @classmethod
     def _build_investigation_prompt(
@@ -535,7 +533,10 @@ Required JSON Structure:
         evidence_items: List[Dict[str, Any]],
         graph_analysis: Dict[str, Any],
         retrieved_policies: List[Dict[str, Any]],
-        missing_evidence: List[str]
+        missing_evidence: List[str],
+        # Phase 3 grounding inputs
+        rule_evaluation_results: Dict[str, Any] = None,
+        historical_patterns: List[Dict[str, Any]] = None,
     ) -> str:
         prompt_sections = [
             f"CASE METADATA:",
@@ -568,12 +569,55 @@ Required JSON Structure:
         prompt_sections.append("")
         prompt_sections.append("RETRIEVED POLICY GUIDELINES:")
         if not retrieved_policies:
-            prompt_sections.append("- Default Fraud Investigation SOP: Any dispute rate > 1% or multi-account device rings warrant temporary protective restriction.")
+            prompt_sections.append("- No specific policy guidelines retrieved for this case.")
         else:
             for p in retrieved_policies:
                 prompt_sections.append(f"- Policy: {p.get('document_key', 'POLICY')}: {p.get('text', '')}")
 
+        is_user_unregistered = any(
+            item.get("evidence_type") == "USER_PROFILE" and item.get("retrieval_status") == "MISSING"
+            for item in evidence_items
+        ) or any("USER_PROFILE" in str(m) for m in missing_evidence)
+
+        if is_user_unregistered:
+            prompt_sections.append("")
+            prompt_sections.append("CRITICAL INSTRUCTION - UNREGISTERED ENTITY / MISSING USER RECORD:")
+            prompt_sections.append("- The target entity does NOT exist in the core m_users directory (no account, no orders, no transaction history).")
+            prompt_sections.append("- Your explanation must directly and clearly state that this user's details do not exist in the master database (m_users).")
+            prompt_sections.append("- Do NOT describe network risk as 'normal' (there is no network/device footprint) and do NOT recommend customer 'step-up authentication' (since there is no existing account to authenticate).")
+            prompt_sections.append("- Output assessment as 'SUSPICIOUS' and recommendation as 'BLOCK_USER' or 'ESCALATE' to prevent unauthorized processing for non-existent users.")
+
         prompt_sections.append("")
+        # --- Phase 3: Deterministic Rule Engine Results ---
+        if rule_evaluation_results:
+            triggered = rule_evaluation_results.get("triggered_rules", [])
+            passed = rule_evaluation_results.get("passed_rules", [])
+            score = rule_evaluation_results.get("total_risk_score", 0.0)
+            severity = rule_evaluation_results.get("highest_severity", "NONE")
+            prompt_sections.append("")
+            prompt_sections.append("DETERMINISTIC RULE ENGINE RESULTS (pre-computed, authoritative):")
+            prompt_sections.append(f"- Composite Risk Score: {score:.2f} / 1.00")
+            prompt_sections.append(f"- Highest Triggered Severity: {severity}")
+            if triggered:
+                prompt_sections.append("- TRIGGERED RULES (violations that MUST be cited in your explanation):")
+                for r in triggered:
+                    prompt_sections.append(
+                        f"  * [{r['rule_id']}] {r['rule_name']} | Severity: {r['severity']} | "
+                        f"Observed: {r['observed_value']} | Threshold: {r['threshold_value']} {r.get('threshold_unit','')} | Note: {r['note']}"
+                    )
+            else:
+                prompt_sections.append("- No fraud rules triggered (all rules passed).")
+            prompt_sections.append("IMPORTANT: You MUST NOT perform any arithmetic. Accept these rule results as ground truth.")
+        # --- Phase 3: Historical Intelligence ---
+        if historical_patterns:
+            prompt_sections.append("")
+            prompt_sections.append("HISTORICAL CASE PRECEDENTS (confirmed past outcomes):")
+            for hp in historical_patterns[:3]:
+                prompt_sections.append(
+                    f"- Case {hp.get('case_id','?')} | Disposition: {hp.get('final_disposition')} "
+                    f"| Rules: {hp.get('triggered_rule_ids')} | Notes: {hp.get('analyst_notes','')[:120]}"
+                )
+
         prompt_sections.append("Synthesize the case and output your structured decision JSON now:")
         return "\n".join(prompt_sections)
 
@@ -625,6 +669,25 @@ Required JSON Structure:
                 "statement": f"Entity graph traversal detected multiple users sharing {shared_dev} common hardware device(s).",
                 "evidence_references": []
             })
+
+        is_user_unregistered = any(
+            item.get("evidence_type") == "USER_PROFILE" and item.get("retrieval_status") == "MISSING"
+            for item in evidence_items
+        ) or any("USER_PROFILE" in str(m) for m in missing_evidence)
+
+        if is_user_unregistered:
+            return {
+                "assessment": "SUSPICIOUS",
+                "recommendation": "BLOCK_USER",
+                "explanation": "Target user details do not exist in the m_users core database. Unregistered identity with no verified customer profile or account history.",
+                "confidence_label": "HIGH",
+                "risk_indicators": [{
+                    "statement": "Customer identity record was not located in master m_users database.",
+                    "evidence_references": [ev.get("id") for ev in evidence_items if ev.get("evidence_type") == "USER_PROFILE"]
+                }],
+                "counter_signals": [],
+                "model_name": model_tag
+            }
 
         if has_chargebacks or has_high_network_risk:
             assessment = "SUSPICIOUS"

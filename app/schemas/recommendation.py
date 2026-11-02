@@ -7,6 +7,8 @@ class IndicatorItem(BaseModel):
 
 class StructuredRecommendation(BaseModel):
     """Schema-validated structured investigation output contract."""
+    model_config = {"protected_namespaces": ()}
+
     case_id: str
     assessment: Literal["SUSPICIOUS", "INCONCLUSIVE", "NOT_SUBSTANTIATED"]
     recommendation: Literal[

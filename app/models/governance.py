@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 import uuid
 from sqlalchemy import (
     Column, String, Integer, TIMESTAMP, Boolean, JSON,
-    ForeignKey, Index
+    Text, ForeignKey, Index
 )
 from sqlalchemy.orm import relationship
 from app.extensions import db
@@ -75,7 +75,7 @@ class PolicyDocument(db.Model):
     version = Column(String(30), nullable=False, default="1.0")
     category = Column(String(100), nullable=True, default="GENERAL") # 'CHARGEBACK', 'AUTO_ACTION', 'DEVICE_RING', 'HUMAN_REVIEW', 'IDENTITY'
     description = Column(String(500), nullable=True)
-    content = Column(String(2000), nullable=True)
+    content = Column(Text, nullable=True)
     action_impact = Column(String(100), nullable=True, default="ADVISORY") # 'BLOCKING', 'RESTRICTIVE', 'ADVISORY', 'MONITORING'
     status = Column(String(30), nullable=False, default="APPROVED")  # 'APPROVED', 'DRAFT', 'DEPRECATED'
     effective_from = Column(TIMESTAMP, nullable=True)
