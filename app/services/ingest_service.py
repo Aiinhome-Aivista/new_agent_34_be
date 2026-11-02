@@ -175,6 +175,19 @@ class IngestService:
                     priority = "HIGH"
                     ingested_count += 1
 
+                    # Pipeline A: Register unverified entity node in graph store
+                    try:
+                        from app.services.knowledgebase.graph_store import GraphStoreService
+                        GraphStoreService.upsert_node(
+                            node_id=target_user_id,
+                            entity_type="USER",
+                            display_label=user_display,
+                            properties={"email": raw_email, "unregistered": True},
+                            risk_score=1.0
+                        )
+                    except Exception as graph_hook_err:
+                        logger.warning(f"GraphStore unregistered node hook note: {graph_hook_err}")
+
                     # Enqueue case directly into investigation queue
                     idempotency_key = f"USER_UNREGISTERED_{target_user_id}_{int(time.time())}"
                     trigger_req = TriggerRequest(
@@ -305,6 +318,33 @@ class IngestService:
                     f"KYC: {user.kyc_status} | Risk Level: {user.risk_level} (Score: {user.risk_score or 0}) | "
                     f"Domain Profile: {orders_count} orders, {payments_count} payments, {chargebacks_count} disputes"
                 )[:495]
+
+                # Pipeline A: Incrementally populate Entity Graph Store for user, orders, and payments
+                try:
+                    from app.services.knowledgebase.graph_store import GraphStoreService
+                    GraphStoreService.process_user_ingestion(
+                        user_id=user.user_id,
+                        email=user.email,
+                        display_name=user_display
+                    )
+                    for o in linked_orders:
+                        GraphStoreService.process_order_ingestion({
+                            "user_id": user.user_id,
+                            "order_id": o.order_id,
+                            "device_id": getattr(o, "device_id", None),
+                            "ip_address": getattr(o, "ip_address", None),
+                            "merchant_id": getattr(o, "merchant_id", None),
+                        })
+                    for p in linked_payments:
+                        GraphStoreService.process_payment_ingestion({
+                            "user_id": user.user_id,
+                            "payment_id": p.payment_id,
+                            "device_id": getattr(p, "device_id", None),
+                            "ip_address": getattr(p, "ip_address", None),
+                            "payment_method": getattr(p, "payment_method", None),
+                        })
+                except Exception as graph_hook_err:
+                    logger.warning(f"GraphStore ingestion hook note: {graph_hook_err}")
 
                 # 5. Auto-Trigger Fraud Investigation Agent
                 if auto_investigate:

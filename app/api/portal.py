@@ -566,8 +566,8 @@ def portal_submit_evidence():
     req_token.submitted_at = utc_now()
     req_token.submission_payload = statement_payload
 
-    # Transition case status back to REQUIRES_REVIEW so fraud analysts know new proof has arrived
-    case.status = "REQUIRES_REVIEW"
+    # Phase 4: Transition case to UNDER_RE_INVESTIGATION — new evidence triggers autonomous re-analysis
+    case.status = "UNDER_RE_INVESTIGATION"
     case.updated_at = utc_now()
 
     db.session.commit()
@@ -590,14 +590,48 @@ def portal_submit_evidence():
         }
     )
 
+    # Phase 4: Trigger automated re-investigation in a background thread
+    re_investigation_case_id = case.id
+
+    def _run_reinvestigation(case_id_inner):
+        import time as _time
+        _time.sleep(1.0)
+        try:
+            from flask import current_app
+            _app = current_app._get_current_object()
+            with _app.app_context():
+                from app.agent.graph import execute_case_investigation
+                from app.services.audit_service import AuditService as _Audit
+                _Audit.record_event(
+                    event_type="RE_INVESTIGATION_TRIGGERED",
+                    actor_type="CUSTOMER_PORTAL_AUTO",
+                    correlation_id=case_id_inner,
+                    case_id=case_id_inner,
+                    details={"trigger": "CUSTOMER_EVIDENCE_SUBMITTED"}
+                )
+                execute_case_investigation(case_id_inner)
+                logger.info(f"[Portal] Re-investigation completed for case {case_id_inner}")
+        except Exception as reinv_err:
+            logger.error(f"[Portal] Re-investigation failed for case {case_id_inner}: {reinv_err}")
+
+    import threading
+    reinv_thread = threading.Thread(
+        target=_run_reinvestigation,
+        args=(re_investigation_case_id,),
+        daemon=True,
+        name=f"reinv-{re_investigation_case_id[:8]}"
+    )
+    reinv_thread.start()
+
     submission_reference = f"SUB-{int(time.time())}-{req_token.id[:6].upper()}"
 
     return jsonify({
         "success": True,
         "submission_reference": submission_reference,
-        "message": "Evidence documents and transaction statement submitted successfully.",
+        "message": "Evidence submitted successfully. Automated re-investigation has been triggered.",
         "case_id": case.id,
         "case_status": case.status,
         "items_submitted_count": len(saved_evidence_items),
-        "submitted_at": utc_now().isoformat()
+        "submitted_at": utc_now().isoformat(),
+        "re_investigation_triggered": True
     }), 201

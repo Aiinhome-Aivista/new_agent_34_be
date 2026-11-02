@@ -7,18 +7,25 @@ from app.models.governance import (
     AppUser, PolicyDocument, FraudParameter, ReviewDecision, ActionRequest,
     AuditEvent, IntegrationConfig
 )
+from app.models.knowledgebase import (
+    EntityNode, EntityRelationship,
+    FraudRule, InvestigationHistorySnapshot
+)
 
 __all__ = [
+    # Source domain
     "User",
     "Order",
     "Payment",
     "Chargeback",
+    # Investigation lifecycle
     "InvestigationCase",
     "CaseEvidence",
     "InvestigationRun",
     "Recommendation",
     "RecommendationEvidence",
     "EvidenceRequestToken",
+    # Governance & audit
     "AppUser",
     "PolicyDocument",
     "FraudParameter",
@@ -26,4 +33,9 @@ __all__ = [
     "ActionRequest",
     "AuditEvent",
     "IntegrationConfig",
+    # Knowledgebase (Phase 1)
+    "EntityNode",
+    "EntityRelationship",
+    "FraudRule",
+    "InvestigationHistorySnapshot",
 ]

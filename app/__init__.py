@@ -63,6 +63,13 @@ def create_app(config_class=Config):
         except Exception as seed_err:
             logging.getLogger("fraud_agent.init").warning(f"Seed data initialization note: {seed_err}")
 
+        # Phase 1: Knowledgebase schema migration (idempotent — safe to run on every startup)
+        try:
+            from app.services.knowledgebase.migrate_knowledgebase import migrate_knowledgebase_tables
+            migrate_knowledgebase_tables()
+        except Exception as kb_err:
+            logging.getLogger("fraud_agent.init").warning(f"Knowledgebase migration note: {kb_err}")
+
         try:
             from app.services.ingest_service import AutoTriggerScheduler
             AutoTriggerScheduler.start(app)
