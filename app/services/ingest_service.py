@@ -12,6 +12,7 @@ from typing import Dict, Any, List, Optional
 from app.extensions import db
 from app.config import Config
 from app.models.source_domain import MUser, MOrder, MPayment, MChargeback
+from app.models.investigation import Recommendation, CaseEvidence
 from app.schemas.trigger import TriggerRequest
 from app.services.case_service import CaseService
 from app.agent.graph import execute_case_investigation
@@ -145,48 +146,132 @@ class IngestService:
             }
 
             try:
-                # 1. Resolve User from m_users (by user_id first, then email fallback)
+                # 1. Direct entity resolution from m_users (NO fallback to email if user_id is provided)
                 user = None
                 if raw_user_id:
                     user = MUser.query.filter_by(user_id=raw_user_id).first()
-                if not user and raw_email:
+                elif raw_email:
                     user = MUser.query.filter_by(email=raw_email).first()
 
                 is_provisioned = False
+                case_summary = None
+
                 if not user:
-                    # Auto-provision customer in m_users if not found
-                    new_uid = raw_user_id or f"USR_{uuid.uuid4().hex[:8].upper()}"
-                    new_email = raw_email or f"{new_uid.lower()}@customer.com"
-                    names = (raw_name or "New Customer").strip().split(" ", 1)
-                    fname = names[0]
-                    lname = names[1] if len(names) > 1 else "User"
+                    # User details do NOT exist in m_users core database.
+                    # Do NOT auto-provision into m_users, m_orders, or m_payments.
+                    # Directly log that user details do not exist in the database,
+                    # professionally record the trigger reason, and queue the case for investigation.
+                    target_user_id = raw_user_id or raw_email
+                    user_display = f"Unregistered Customer ({raw_name.strip()})" if raw_name else f"Unregistered User ({target_user_id})"
+                    base_reason = raw_reason.strip() if raw_reason else "Batch Ingestion Ingestion"
 
-                    is_suspicious_reason = any(
-                        term in (raw_reason or "").lower()
-                        for term in ["fraud", "suspicious", "stolen", "decline", "emulator", "ring", "chargeback", "compromise"]
+                    # Professional reason explaining that user details do not exist in the database
+                    enriched_reason = (
+                        f"Unregistered Customer Record / Profile Missing in Core Database | "
+                        f"Target: {target_user_id} | Reason: {base_reason} | "
+                        f"Audit Note: No matching record found in m_users directory; flagged for missing identity verification."
+                    )[:495]
+
+                    priority = "HIGH"
+                    ingested_count += 1
+
+                    # Enqueue case directly into investigation queue
+                    idempotency_key = f"USER_UNREGISTERED_{target_user_id}_{int(time.time())}"
+                    trigger_req = TriggerRequest(
+                        trigger_type="TRANSACTION_INVESTIGATION",
+                        trigger_source="USER_BATCH_INGESTOR",
+                        trigger_reason=enriched_reason,
+                        priority=priority,
+                        idempotency_key=idempotency_key,
+                        transaction_id=None,
+                        user_id=target_user_id,
+                        merchant_id=None
                     )
 
-                    user = MUser(
-                        user_id=new_uid,
-                        external_user_id=f"EXT_{new_uid}",
-                        first_name=fname,
-                        last_name=lname,
-                        email=new_email,
-                        phone_number="+919876543210",
-                        user_type="CUSTOMER",
-                        status="ACTIVE",
-                        country_code="IN",
-                        kyc_status="PENDING",
-                        risk_level="HIGH" if is_suspicious_reason else "MEDIUM",
-                        risk_score=78.0 if is_suspicious_reason else 30.0,
-                        created_at=utc_now()
+                    case, is_dup = CaseService.process_trigger(trigger_req)
+
+                    # Direct and concise explanation - No fallbacks, no fabricated graph/SOP narratives
+                    direct_explanation = (
+                        f"Target user details for '{target_user_id}' do not exist in the master m_users database. "
+                        f"Unregistered customer identity with zero account, order, or transaction history. "
+                        f"Action recommended: BLOCK_USER to prevent unauthorized access."
                     )
-                    db.session.add(user)
+
+                    # Record missing profile evidence item
+                    missing_evidence = CaseEvidence(
+                        id=str(uuid.uuid4()),
+                        case_id=case.id,
+                        evidence_type="USER_PROFILE",
+                        source_system="CUSTOMER_IDENTITY_DB",
+                        source_reference=target_user_id,
+                        retrieval_status="MISSING",
+                        retrieved_at=utc_now(),
+                        normalized_payload={"reason": f"User {target_user_id} profile record was not located in m_users database."}
+                    )
+                    db.session.add(missing_evidence)
+
+                    # Record direct recommendation (no fallbacks)
+                    rec = Recommendation(
+                        id=str(uuid.uuid4()),
+                        case_id=case.id,
+                        assessment="SUSPICIOUS",
+                        recommendation_type="BLOCK_USER",
+                        explanation=direct_explanation,
+                        confidence_label="HIGH",
+                        human_review_required=True,
+                        model_name="System Core Verification Engine",
+                        prompt_version="1.0",
+                        policy_version="1.0",
+                        structured_result={
+                            "assessment": "SUSPICIOUS",
+                            "recommendation": "BLOCK_USER",
+                            "explanation": direct_explanation,
+                            "confidence_label": "HIGH",
+                            "risk_indicators": [{
+                                "statement": f"User '{target_user_id}' was not located in master m_users directory.",
+                                "evidence_references": [missing_evidence.id]
+                            }],
+                            "counter_signals": []
+                        }
+                    )
+                    db.session.add(rec)
+                    case.status = "ACTION_PROPOSED"
                     db.session.commit()
-                    is_provisioned = True
-                    logger.info(f"Auto-provisioned new user in m_users: {user.user_id} ({user.email})")
 
-                # 2. Fetch linked data from m_orders, m_payments, m_chargebacks
+                    case_summary = {
+                        "case_id": case.id,
+                        "transaction_id": "N/A",
+                        "user_id": target_user_id,
+                        "user_name": user_display,
+                        "email": raw_email or "Not Provided",
+                        "status": case.status,
+                        "priority": case.priority,
+                        "assessment": "SUSPICIOUS",
+                        "recommendation": "BLOCK_USER",
+                        "explanation": direct_explanation,
+                        "created_at": case.created_at.isoformat(),
+                        "orders_count": 0,
+                        "payments_count": 0,
+                        "chargebacks_count": 0,
+                        "is_provisioned": False,
+                        "user_exists": False
+                    }
+                    triggered_cases.append(case_summary)
+
+                    yield {
+                        "event": "row_done",
+                        "status": "PROCESSING",
+                        "current": current_num,
+                        "total": total_rows,
+                        "percent": percent,
+                        "item_id": target_user_id,
+                        "user_id": target_user_id,
+                        "case": case_summary,
+                        "message": f"User {target_user_id} details not found in database; case queued: SUSPICIOUS (BLOCK_USER)"
+                    }
+                    continue
+
+                # 2. Existing User: Fetch linked data from m_orders, m_payments, m_chargebacks
                 linked_orders = MOrder.query.filter_by(user_id=user.user_id).order_by(MOrder.created_at.desc()).all()
                 linked_payments = MPayment.query.filter_by(user_id=user.user_id).order_by(MPayment.initiated_at.desc()).all()
                 payment_ids = [p.payment_id for p in linked_payments]
@@ -195,73 +280,14 @@ class IngestService:
                     if payment_ids else []
                 )
 
-                # 3. Ensure baseline order & payment exist if newly provisioned or empty history
-                if not linked_payments:
-                    default_merchant = MUser.query.filter_by(user_type="MERCHANT").first()
-                    merch_id = default_merchant.user_id if default_merchant else "MERCH_PRIME_01"
-                    if not default_merchant:
-                        default_merchant = MUser(
-                            user_id=merch_id,
-                            email="prime.retail@merchant.com",
-                            first_name="Prime",
-                            last_name="Retail Ltd",
-                            user_type="MERCHANT",
-                            status="ACTIVE",
-                            country_code="IN",
-                            kyc_status="VERIFIED",
-                            risk_level="LOW",
-                            created_at=utc_now()
-                        )
-                        db.session.add(default_merchant)
-
-                    base_ord_id = f"ORD_{uuid.uuid4().hex[:8].upper()}"
-                    base_pay_id = f"PAY_{uuid.uuid4().hex[:8].upper()}"
-                    new_order = MOrder(
-                        order_id=base_ord_id,
-                        user_id=user.user_id,
-                        merchant_id=merch_id,
-                        amount=15000.0,
-                        currency="INR",
-                        order_status="PAID",
-                        ip_address="103.21.144.12",
-                        device_id=f"DEV_{uuid.uuid4().hex[:8].upper()}",
-                        billing_country=user.country_code or "IN",
-                        shipping_country=user.country_code or "IN",
-                        created_at=utc_now()
-                    )
-                    db.session.add(new_order)
-
-                    new_payment = MPayment(
-                        payment_id=base_pay_id,
-                        order_id=base_ord_id,
-                        user_id=user.user_id,
-                        merchant_id=merch_id,
-                        payment_method="CARD",
-                        payment_status="AUTHORIZED",
-                        amount=15000.0,
-                        currency="INR",
-                        gateway_transaction_id=f"GW_{base_pay_id}",
-                        ip_address=new_order.ip_address,
-                        device_id=new_order.device_id,
-                        initiated_at=utc_now()
-                    )
-                    db.session.add(new_payment)
-                    db.session.commit()
-
-                    target_tx_id = base_pay_id
-                    target_merch_id = merch_id
-                    orders_count = 1
-                    payments_count = 1
-                else:
-                    target_tx_id = linked_payments[0].payment_id
-                    target_merch_id = linked_payments[0].merchant_id
-                    orders_count = len(linked_orders)
-                    payments_count = len(linked_payments)
-
+                orders_count = len(linked_orders)
+                payments_count = len(linked_payments)
                 chargebacks_count = len(linked_chargebacks)
+                target_tx_id = linked_payments[0].payment_id if linked_payments else None
+                target_merch_id = linked_payments[0].merchant_id if linked_payments else None
                 ingested_count += 1
 
-                # 4. Compute Dynamic Priority based on master domain state & policy signals
+                # 3. Compute Dynamic Priority based on master domain state & policy signals
                 is_high_risk = (
                     user.risk_level == "HIGH" or
                     user.kyc_status in ["REJECTED", "NOT_STARTED"] or
@@ -271,17 +297,16 @@ class IngestService:
                 )
                 priority = "HIGH" if is_high_risk else "MEDIUM"
 
-                # 5. Enrich Trigger Reason with Master Tables Evidence Context
+                # 4. Enrich Trigger Reason with Master Tables Evidence Context
                 base_reason = raw_reason.strip() if raw_reason else "Batch Ingestion User Audit"
                 user_display = f"{user.first_name or ''} {user.last_name or ''}".strip() or user.user_id
                 enriched_reason = (
                     f"{base_reason} | Target: {user.user_id} ({user_display}) | "
                     f"KYC: {user.kyc_status} | Risk Level: {user.risk_level} (Score: {user.risk_score or 0}) | "
                     f"Domain Profile: {orders_count} orders, {payments_count} payments, {chargebacks_count} disputes"
-                )
+                )[:495]
 
-                # 6. Auto-Trigger Fraud Investigation Agent
-                case_summary = None
+                # 5. Auto-Trigger Fraud Investigation Agent
                 if auto_investigate:
                     idempotency_key = f"USER_INGEST_{user.user_id}_{int(time.time())}"
                     trigger_req = TriggerRequest(
@@ -306,7 +331,7 @@ class IngestService:
                     rec = case.recommendations[-1] if case.recommendations else None
                     case_summary = {
                         "case_id": case.id,
-                        "transaction_id": target_tx_id,
+                        "transaction_id": target_tx_id or "N/A",
                         "user_id": user.user_id,
                         "user_name": user_display,
                         "email": user.email,
@@ -319,11 +344,11 @@ class IngestService:
                         "orders_count": orders_count,
                         "payments_count": payments_count,
                         "chargebacks_count": chargebacks_count,
-                        "is_provisioned": is_provisioned
+                        "is_provisioned": False,
+                        "user_exists": True
                     }
                     triggered_cases.append(case_summary)
 
-                prov_note = " (auto-provisioned)" if is_provisioned else ""
                 yield {
                     "event": "row_done",
                     "status": "PROCESSING",
@@ -333,7 +358,7 @@ class IngestService:
                     "item_id": user.user_id,
                     "user_id": user.user_id,
                     "case": case_summary,
-                    "message": f"Processed user {user.user_id} ({user_display}){prov_note}: {case_summary['assessment'] if case_summary else 'SAVED'}"
+                    "message": f"Processed user {user.user_id} ({user_display}): {case_summary['assessment'] if case_summary else 'SAVED'}"
                 }
 
             except Exception as row_err:

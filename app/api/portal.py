@@ -83,14 +83,14 @@ def admin_request_evidence(case_id):
             user_record = User.query.filter_by(user_id=user_id).first()
 
     recipient_email = getattr(user_record, "email", None) if user_record else None
-    if not recipient_email and case.transaction_id:
-        # Fallback to payment user lookup
-        payment = MPayment.query.filter_by(payment_id=case.transaction_id).first() or Payment.query.filter_by(payment_id=case.transaction_id).first()
-        if payment and payment.user_id:
-            user_id = payment.user_id
-            u = MUser.query.filter_by(user_id=user_id).first() or User.query.filter_by(user_id=user_id).first()
-            if u:
-                recipient_email = u.email
+    if not recipient_email and user_id and "@" in user_id:
+        recipient_email = user_id
+
+    if not recipient_email:
+        return jsonify({
+            "error": "Missing Registered Email",
+            "message": f"User '{user_id or case.user_id_ref}' has no registered email address in database. Cannot dispatch evidence request link."
+        }), 400
 
     if not user_id:
         user_id = f"USER_{case_id[:8]}"

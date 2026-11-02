@@ -1,7 +1,7 @@
 import logging
 from typing import Dict, Any, List, Optional
 from app.config import Config
-from app.models.source_domain import Order, Payment
+from app.models.source_domain import User, Order, Payment
 
 logger = logging.getLogger("fraud_agent.graph_service")
 
@@ -57,9 +57,22 @@ class GraphEntityService:
 
         # Relational link discovery from actual persisted orders and payments
         if user_id:
+            user = User.query.filter_by(user_id=user_id).first()
             user_orders = Order.query.filter_by(user_id=user_id).all()
             user_devices = {o.device_id for o in user_orders if o.device_id}
             user_ips = {o.ip_address for o in user_orders if o.ip_address}
+
+            # If user does not exist in master table and has no transaction records:
+            if not user and not user_orders:
+                return {
+                    "status": "UNREGISTERED_ENTITY",
+                    "nodes": [],
+                    "edges": [],
+                    "shared_devices_count": 0,
+                    "shared_ips_count": 0,
+                    "network_risk_indicator": "NOT_APPLICABLE",
+                    "details": f"User '{user_id}' does not exist in the m_users core database. No graph or device correlations exist."
+                }
 
             nodes.append({"id": user_id, "label": f"User: {user_id[:8]}", "type": "USER"})
 
@@ -85,11 +98,17 @@ class GraphEntityService:
                     for co in co_ips:
                         shared_ips.append({"ip_address": ip, "linked_user_id": co.user_id})
 
+        # Do NOT fall back to 'NORMAL' when there are no devices or IPs
+        if shared_devices or shared_ips:
+            network_risk = "HIGH" if (len(shared_devices) > 2 or len(shared_ips) > 3) else "NORMAL"
+        else:
+            network_risk = "NOT_APPLICABLE"
+
         return {
-            "status": "ANALYZED",
+            "status": "ANALYZED" if (shared_devices or shared_ips) else "NO_ACTIVITY",
             "nodes": nodes,
             "edges": edges,
             "shared_devices_count": len(shared_devices),
             "shared_ips_count": len(shared_ips),
-            "network_risk_indicator": "HIGH" if (len(shared_devices) > 2 or len(shared_ips) > 3) else "NORMAL"
+            "network_risk_indicator": network_risk
         }
