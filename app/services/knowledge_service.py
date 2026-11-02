@@ -84,7 +84,7 @@ class KnowledgeService:
                 category=category.strip().upper(),
                 action_impact=action_impact.strip().upper(),
                 description=description.strip() or f"Company policy document imported from {filename}",
-                content=extracted_text[:1800],
+                content=extracted_text,
                 status="APPROVED",
                 source_reference=filename
             )
@@ -96,7 +96,7 @@ class KnowledgeService:
             policy.action_impact = action_impact.strip().upper()
             if description:
                 policy.description = description.strip()
-            policy.content = extracted_text[:1800]
+            policy.content = extracted_text
             policy.source_reference = filename
 
         db.session.commit()
@@ -126,7 +126,9 @@ class KnowledgeService:
                 title=title,
                 section=section_name,
                 text=chunk,
-                version=version
+                version=version,
+                category=category,
+                is_active=True
             )
             if success:
                 indexed_chunks += 1
@@ -211,7 +213,7 @@ class KnowledgeService:
             chunks = cls._chunk_text(text_to_index, chunk_size=750, overlap=100)
             for i, chunk in enumerate(chunks):
                 sec = f"Clause_{i+1}"
-                if PolicyRAGService.ingest_policy(pol.document_key, pol.title, sec, chunk, pol.version):
+                if PolicyRAGService.ingest_policy(pol.document_key, pol.title, sec, chunk, pol.version, category=getattr(pol, "category", "GENERAL"), is_active=(pol.status == "APPROVED")):
                     total_chunks += 1
             success_docs += 1
 

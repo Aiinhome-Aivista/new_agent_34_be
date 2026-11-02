@@ -92,7 +92,7 @@ class PolicyRAGService:
             }
 
     @classmethod
-    def ingest_policy(cls, document_key: str, title: str, section: str, text: str, version: str = "1.0") -> bool:
+    def ingest_policy(cls, document_key: str, title: str, section: str, text: str, version: str = "1.0", category: str = "GENERAL", is_active: bool = True) -> bool:
         """Indexes an approved policy excerpt into ChromaDB with explicit metadata."""
         collection = cls.get_collection()
         if collection is None:
@@ -107,7 +107,10 @@ class PolicyRAGService:
                     "document_key": document_key,
                     "title": title,
                     "section": section,
-                    "version": version
+                    "version": version,
+                    "category": category,
+                    "policy_category": category,
+                    "is_active": is_active
                 }]
             )
             return True
