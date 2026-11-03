@@ -1,4 +1,5 @@
 import json
+import time
 import logging
 import re
 from abc import ABC, abstractmethod
@@ -108,8 +109,12 @@ class GeminiProvider(BaseLLMProvider):
             "generationConfig": generation_config
         }
 
+        t0 = time.time()
+        print(f"   🌐 [LLM-HTTP] >>> POST {url.split('?')[0]} (Model: {self.model})", flush=True)
         with httpx.Client(timeout=self.timeout) as client:
             resp = client.post(url, json=payload)
+            elapsed = round(time.time() - t0, 2)
+            print(f"   🌐 [LLM-HTTP] <<< HTTP {resp.status_code} received in {elapsed}s", flush=True)
             resp.raise_for_status()
             data = resp.json()
 
@@ -474,54 +479,172 @@ Required JSON Structure:
             historical_patterns=historical_patterns or [],
         )
 
-        try:
-            logger.info(f"Dispatching investigation reasoning to LLM Provider: {provider.provider_name} ({provider.model_name})")
-            raw_response = provider.generate(prompt=prompt, system_prompt=cls.SYSTEM_PROMPT, json_mode=True)
-            parsed_json = extract_json_from_response(raw_response)
+        # Prominent Terminal Logging for Investigation Reasoning
+        dispatch_start = time.time()
+        rule_res = rule_evaluation_results or {}
+        trig_rules = [r.get("rule_id") for r in rule_res.get("triggered_rules", [])]
 
-            if parsed_json and "assessment" in parsed_json and "recommendation" in parsed_json:
-                # Validate recommendation type is acceptable
-                rec = parsed_json.get("recommendation", "MONITOR")
-                valid_recs = {
-                    "NO_ACTION", "MONITOR", "REQUEST_VERIFICATION", "SEND_NOTIFICATION",
-                    "TEMPORARY_RESTRICTION", "HOLD_TRANSACTION", "BLOCK_TRANSACTION",
-                    "BLOCK_USER", "BLOCK_MERCHANT", "ESCALATE"
-                }
-                if rec not in valid_recs:
-                    rec = "REQUEST_VERIFICATION" if parsed_json.get("assessment") == "INCONCLUSIVE" else "MONITOR"
+        print("\n" + "=" * 80, flush=True)
+        print(f"🤖 [LLM INVESTIGATION DISPATCH] Case: {case_id}", flush=True)
+        print(f"   Provider:      {provider.provider_name.upper()} | Model: {provider.model_name}", flush=True)
+        print(f"   Trigger Type:  {trigger_type} (Priority: {priority})", flush=True)
+        print(f"   Trigger Note:  {trigger_reason[:75]}...", flush=True)
+        print(f"   Grounding:     Evidence Items: {len(evidence_items)} | Active Policies: {len(retrieved_policies)} | Triggered Rules: {trig_rules or 'None'}", flush=True)
+        print("-" * 80, flush=True)
 
-                # Validate assessment
-                assessment = parsed_json.get("assessment", "INCONCLUSIVE")
-                if assessment not in {"SUSPICIOUS", "NOT_SUBSTANTIATED", "INCONCLUSIVE"}:
-                    assessment = "INCONCLUSIVE"
+        max_attempts = 3
+        last_error = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                print(f"▶️  [Attempt {attempt}/{max_attempts}] Querying LLM Engine...", flush=True)
+                raw_response = provider.generate(prompt=prompt, system_prompt=cls.SYSTEM_PROMPT, json_mode=True)
+                parsed_json = extract_json_from_response(raw_response)
 
-                confidence = parsed_json.get("confidence_label", "MEDIUM")
-                if confidence not in {"HIGH", "MEDIUM", "LOW"}:
-                    confidence = "MEDIUM"
+                if parsed_json and "assessment" in parsed_json and "recommendation" in parsed_json:
+                    rec = parsed_json.get("recommendation", "MONITOR")
+                    valid_recs = {
+                        "NO_ACTION", "MONITOR", "REQUEST_VERIFICATION", "SEND_NOTIFICATION",
+                        "TEMPORARY_RESTRICTION", "HOLD_TRANSACTION", "BLOCK_TRANSACTION",
+                        "BLOCK_USER", "BLOCK_MERCHANT", "ESCALATE"
+                    }
+                    if rec not in valid_recs:
+                        rec = "REQUEST_VERIFICATION" if parsed_json.get("assessment") == "INCONCLUSIVE" else "MONITOR"
 
-                explanation = parsed_json.get("explanation", "").strip()
-                if len(explanation) < 20:
-                    explanation = f"Automated analysis completed by {model_tag}: Evidence synthesized for {trigger_type} with confidence {confidence}."
+                    assessment = parsed_json.get("assessment", "INCONCLUSIVE")
+                    if assessment not in {"SUSPICIOUS", "NOT_SUBSTANTIATED", "INCONCLUSIVE"}:
+                        assessment = "INCONCLUSIVE"
 
-                risk_indicators = parsed_json.get("risk_indicators", [])
-                counter_signals = parsed_json.get("counter_signals", [])
+                    confidence = parsed_json.get("confidence_label", "MEDIUM")
+                    if confidence not in {"HIGH", "MEDIUM", "LOW"}:
+                        confidence = "MEDIUM"
 
-                logger.info(f"LLM reasoning successfully synthesized by {model_tag} with assessment: {assessment}, recommendation: {rec}")
-                return {
-                    "assessment": assessment,
-                    "recommendation": rec,
-                    "explanation": explanation,
-                    "confidence_label": confidence,
-                    "risk_indicators": risk_indicators,
-                    "counter_signals": counter_signals,
-                    "model_name": model_tag
-                }
-            else:
-                logger.error(f"LLM response did not contain expected schema fields. Raw response: {raw_response[:200] if raw_response else 'EMPTY'}")
-                raise ValueError("LLM response did not contain valid structured schema fields.")
-        except Exception as e:
-            logger.error(f"LLM Provider invocation failed ({provider.provider_name}): {e}")
-            raise RuntimeError(f"LLM reasoning failed: {e}")
+                    explanation = parsed_json.get("explanation", "").strip()
+                    if len(explanation) < 20:
+                        explanation = f"Automated analysis completed by {model_tag}: Evidence synthesized for {trigger_type} with confidence {confidence}."
+
+                    risk_indicators = parsed_json.get("risk_indicators", [])
+                    counter_signals = parsed_json.get("counter_signals", [])
+
+                    total_elapsed = round(time.time() - dispatch_start, 2)
+                    print("-" * 80, flush=True)
+                    print(f"✅ [LLM SYNTHESIS SUCCESS] Completed in {total_elapsed}s by {model_tag}", flush=True)
+                    print(f"   Assessment:          {assessment}", flush=True)
+                    print(f"   Action Proposal:     {rec}", flush=True)
+                    print(f"   Confidence Level:    {confidence}", flush=True)
+                    print(f"   Risk Indicators:     {len(risk_indicators)} detected", flush=True)
+                    print(f"   Forensic Summary:    {explanation[:120]}...", flush=True)
+                    print("=" * 80 + "\n", flush=True)
+
+                    logger.info(f"LLM reasoning successfully synthesized by {model_tag} with assessment: {assessment}, recommendation: {rec}")
+                    return {
+                        "assessment": assessment,
+                        "recommendation": rec,
+                        "explanation": explanation,
+                        "confidence_label": confidence,
+                        "risk_indicators": risk_indicators,
+                        "counter_signals": counter_signals,
+                        "model_name": model_tag
+                    }
+                else:
+                    print(f"⚠️  [Attempt {attempt}] Response missing required schema fields. Retrying...", flush=True)
+                    logger.warning(f"LLM response attempt {attempt} missing schema fields. Retrying...")
+                    last_error = ValueError("Missing schema fields in response")
+            except Exception as e:
+                last_error = e
+                print(f"⚠️  [Attempt {attempt} Error] {e}", flush=True)
+                logger.warning(f"LLM attempt {attempt} failed ({provider.provider_name}): {e}")
+                if attempt < max_attempts:
+                    retry_wait = round(1.5 * attempt, 1)
+                    print(f"⏳ Waiting {retry_wait}s before retry...", flush=True)
+                    time.sleep(retry_wait)
+
+        # Fallback to grounded deterministic rule engine reasoning if external LLM is offline/exhausted
+        print("-" * 80, flush=True)
+        print(f"🛡️  [LLM FALLBACK ENGAGED] External LLM exhausted ({last_error})", flush=True)
+        print("   Activating Deterministic Fraud Rule Engine & Entity Graph Synthesis...", flush=True)
+        print("=" * 80 + "\n", flush=True)
+        logger.warning(f"LLM exhausted all {max_attempts} attempts ({last_error}). Falling back to deterministic rule engine reasoning.")
+        return cls._fallback_deterministic_reasoning(
+            case_id=case_id,
+            trigger_type=trigger_type,
+            trigger_reason=trigger_reason,
+            priority=priority,
+            evidence_items=evidence_items,
+            graph_analysis=graph_analysis,
+            retrieved_policies=retrieved_policies,
+            rule_evaluation_results=rule_evaluation_results,
+            historical_patterns=historical_patterns,
+        )
+
+    @classmethod
+    def _fallback_deterministic_reasoning(
+        cls,
+        case_id: str,
+        trigger_type: str,
+        trigger_reason: str,
+        priority: str,
+        evidence_items: list,
+        graph_analysis: dict,
+        retrieved_policies: list,
+        rule_evaluation_results: dict,
+        historical_patterns: list,
+    ) -> dict:
+        """
+        Grounded deterministic fallback synthesis when external LLM provider is unavailable (503 / timeout).
+        Uses RuleEngine triggered rules, severity, and evidence directly to ensure zero pipeline stall.
+        """
+        rule_results = rule_evaluation_results or {}
+        triggered = rule_results.get("triggered_rules", [])
+        total_score = rule_results.get("total_risk_score", 0.0)
+        highest_severity = rule_results.get("highest_severity", "LOW")
+
+        risk_indicators = []
+        for r in triggered:
+            risk_indicators.append({
+                "statement": f"Triggered fraud rule {r.get('rule_id')}: {r.get('rule_name')} (severity: {r.get('severity')}, observed: {r.get('observed_value')}, threshold: {r.get('threshold_value')})",
+                "evidence_references": [e.get("id") for e in evidence_items if e.get("id")]
+            })
+
+        signals = (graph_analysis or {}).get("risk_signals", [])
+        for s in signals:
+            risk_indicators.append({
+                "statement": f"Graph Entity Risk: {s.get('signal')} - {s.get('detail')}",
+                "evidence_references": []
+            })
+
+        if highest_severity == "CRITICAL" or total_score >= 0.35:
+            assessment = "SUSPICIOUS"
+            recommendation = "BLOCK_USER" if any(r.get("rule_id") == "FR-001" for r in triggered) else "BLOCK_TRANSACTION"
+            confidence = "HIGH"
+        elif highest_severity == "HIGH" or total_score >= 0.20:
+            assessment = "SUSPICIOUS"
+            recommendation = "HOLD_TRANSACTION"
+            confidence = "HIGH"
+        elif highest_severity == "MEDIUM" or total_score >= 0.10:
+            assessment = "INCONCLUSIVE"
+            recommendation = "REQUEST_VERIFICATION"
+            confidence = "MEDIUM"
+        else:
+            assessment = "NOT_SUBSTANTIATED"
+            recommendation = "MONITOR"
+            confidence = "LOW"
+
+        explanation = (
+            f"Deterministic Forensic Synthesis (LLM Fallback): Case evaluated against structured fraud knowledgebase. "
+            f"Rule Engine identified {len(triggered)} triggered rule(s) with total risk score of {total_score:.2f} "
+            f"and highest severity '{highest_severity}'. Trigger reason: '{trigger_reason}'. "
+            f"Grounding evidence references: {len(evidence_items)} item(s) collected."
+        )
+
+        return {
+            "assessment": assessment,
+            "recommendation": recommendation,
+            "explanation": explanation,
+            "confidence_label": confidence,
+            "risk_indicators": risk_indicators,
+            "counter_signals": [],
+            "model_name": "Deterministic-RuleEngine-Fallback"
+        }
 
     @classmethod
     def _build_investigation_prompt(
