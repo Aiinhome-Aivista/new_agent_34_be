@@ -292,9 +292,12 @@ def admin_request_evidence(case_id):
     if not user_id:
         user_id = f"USER_{case_id[:8]}"
 
-    # Revoke any prior active tokens for this case to enforce single valid link
-    active_tokens = EvidenceRequestToken.query.filter_by(case_id=case_id, status="ISSUED").all()
-    for at in active_tokens:
+    # Revoke any prior unsubmitted active tokens for this case to enforce single valid link
+    prior_unsubmitted = EvidenceRequestToken.query.filter(
+        EvidenceRequestToken.case_id == case_id,
+        EvidenceRequestToken.status.in_(["ISSUED", "ACCESSED", "VERIFIED"])
+    ).all()
+    for at in prior_unsubmitted:
         at.status = "REVOKED"
 
     # Generate high-entropy token
@@ -302,30 +305,7 @@ def admin_request_evidence(case_id):
     tok_hash = hash_token(raw_token)
     expires_at = utc_now() + timedelta(hours=expiry_hours)
 
-    req_token = EvidenceRequestToken(
-        id=str(uuid.uuid4()),
-        case_id=case_id,
-        user_id=user_id,
-        token_hash=tok_hash,
-        requested_by=reviewer_id,
-        request_reason=reason,
-        requested_documents=requested_documents,
-        status="ISSUED",
-        expires_at=expires_at,
-        created_at=utc_now()
-    )
-    db.session.add(req_token)
-
-    # Transition case status to COLLECTING_EVIDENCE
-    case.status = "COLLECTING_EVIDENCE"
-    db.session.commit()
-
-    # Determine base portal URL:
-    # Priority:
-    # 1. Origin header (e.g. http://localhost:5173 from React app)
-    # 2. Referer header
-    # 3. Config.FRONTEND_BASE_URL
-    # 4. Fallback to request.host_url
+    # Determine base portal URL
     origin = request.headers.get("Origin")
     referer = request.headers.get("Referer")
     frontend_base = None
@@ -341,6 +321,26 @@ def admin_request_evidence(case_id):
         frontend_base = request.host_url.rstrip("/")
 
     portal_link = f"{frontend_base}/evidence-submission?token={raw_token}"
+    masked_target_email = mask_email(recipient_email) if recipient_email else "user@domain.com"
+
+    req_token = EvidenceRequestToken(
+        id=str(uuid.uuid4()),
+        case_id=case_id,
+        user_id=user_id,
+        token_hash=tok_hash,
+        requested_by=reviewer_id,
+        request_reason=reason,
+        requested_documents=requested_documents,
+        status="ISSUED",
+        expires_at=expires_at,
+        created_at=utc_now(),
+        submission_payload={"portal_url": portal_link, "recipient_email": masked_target_email}
+    )
+    db.session.add(req_token)
+
+    # Transition case status to COLLECTING_EVIDENCE
+    case.status = "COLLECTING_EVIDENCE"
+    db.session.commit()
 
     customer_name = (
         getattr(user_record, "full_name", None) or
@@ -400,14 +400,26 @@ def admin_request_evidence(case_id):
 @portal_bp.route("/requests-for-case/<case_id>", methods=["GET"])
 def get_case_evidence_requests(case_id):
     """Returns list of evidence requests issued for this case."""
-    requests_list = EvidenceRequestToken.query.filter_by(case_id=case_id).order_by(EvidenceRequestToken.created_at.desc()).all()
+    requests_list = EvidenceRequestToken.query.filter_by(case_id=case_id).order_by(
+        EvidenceRequestToken.created_at.desc(),
+        EvidenceRequestToken.updated_at.desc()
+    ).all()
     for r in requests_list:
         if r.status == "ISSUED" and r.is_expired():
             r.status = "EXPIRED"
     db.session.commit()
+    items = []
+    for r in requests_list:
+        d = r.to_dict()
+        if r.status in ["ISSUED", "ACCESSED", "VERIFIED"] and isinstance(r.submission_payload, dict):
+            if "portal_url" in r.submission_payload:
+                d["portal_url"] = r.submission_payload.get("portal_url")
+            if "recipient_email" in r.submission_payload:
+                d["recipient_email"] = r.submission_payload.get("recipient_email")
+        items.append(d)
     return jsonify({
         "case_id": case_id,
-        "items": [r.to_dict() for r in requests_list]
+        "items": items
     }), 200
 
 # ==============================================================================
