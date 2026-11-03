@@ -7,6 +7,9 @@ import logging
 from datetime import datetime, timezone, timedelta
 from flask import Blueprint, request, jsonify, current_app
 from werkzeug.utils import secure_filename
+from io import BytesIO
+import pypdf
+import re
 
 from app.config import Config
 from app.extensions import db
@@ -49,6 +52,200 @@ def validate_magic_bytes(file_header: bytes, ext: str) -> bool:
         # Text file can have arbitrary bytes, but should be decodable text
         return True
     return False
+
+def extract_document_text_sample(file_bytes: bytes, ext: str) -> str:
+    """Extracts a text sample from the document bytes for classification."""
+    try:
+        if ext == ".pdf":
+            reader = pypdf.PdfReader(BytesIO(file_bytes))
+            text = ""
+            for page in reader.pages[:3]:
+                t = page.extract_text()
+                if t:
+                    text += t + "\n"
+            return text.strip()
+        elif ext in {".txt", ".csv"}:
+            return file_bytes.decode("utf-8", errors="ignore")[:4000]
+        elif ext == ".docx":
+            import zipfile
+            with zipfile.ZipFile(BytesIO(file_bytes)) as z:
+                if "word/document.xml" in z.namelist():
+                    xml_content = z.read("word/document.xml").decode("utf-8", errors="ignore")
+                    return re.sub(r"<[^>]+>", " ", xml_content)[:4000]
+    except Exception as e:
+        logger.warning(f"Error extracting text from document: {e}")
+    return ""
+
+def validate_document_relevance_internal(file_bytes: bytes, filename: str, doc_type_key: str, doc_type_label: str) -> dict:
+    """
+    Validates whether an uploaded file is relevant to the target document type.
+    Combines MIME checks, text feature extraction, keyword bank classification, and LLM semantic evaluation.
+    """
+    _, ext = os.path.splitext(filename.lower())
+    if ext not in ALLOWED_EVIDENCE_EXTENSIONS:
+        return {
+            "is_relevant": False,
+            "confidence": 0.0,
+            "detected_type": "UNSUPPORTED_FORMAT",
+            "reason": f"File extension '{ext}' is not supported. Allowed formats: {', '.join(sorted(ALLOWED_EVIDENCE_EXTENSIONS))}"
+        }
+
+    # Verify magic bytes
+    if not validate_magic_bytes(file_bytes[:16], ext):
+        return {
+            "is_relevant": False,
+            "confidence": 0.0,
+            "detected_type": "CORRUPTED_OR_SPOOFED",
+            "reason": f"File header does not match extension '{ext}'. Please ensure the file is not corrupted or renamed incorrectly."
+        }
+
+    extracted_text = extract_document_text_sample(file_bytes, ext)
+    extracted_lower = extracted_text.lower()
+    fname_lower = filename.lower()
+
+    PROFILES = {
+        "GOVT_ID": {
+            "keywords": [
+                "passport", "driving", "driver", "licence", "license", "national id", "identity",
+                "voter", "election", "aadhaar", "uidai", "pan", "income tax department", "ssn",
+                "republic", "government", "govt", "birth", "dob", "father", "citizenship", "resident",
+                "identification", "holder", "card", "department", "state of", "republic of"
+            ],
+            "label": "Government Photo ID"
+        },
+        "TAX_INVOICE": {
+            "keywords": [
+                "invoice", "tax invoice", "bill", "receipt", "gstin", "gst", "vat", "tax", "subtotal",
+                "total", "hsn", "sac", "merchant", "seller", "buyer", "billing address", "purchase order",
+                "po number", "order id", "amount", "unit price", "cgst", "sgst", "igst", "payment terms", "due date"
+            ],
+            "label": "Tax Invoice / Merchant Receipt"
+        },
+        "PAYMENT_PROOF": {
+            "keywords": [
+                "bank", "statement", "account statement", "card statement", "slip", "debit", "credit",
+                "balance", "transaction id", "upi", "neft", "rtgs", "imps", "account number", "acc no",
+                "ifsc", "payment confirmation", "ledger", "branch", "utr", "cheque", "transfer", "net banking"
+            ],
+            "label": "Bank Statement / Card Slip"
+        },
+        "DELIVERY_PROOF": {
+            "keywords": [
+                "delivery", "proof of delivery", "pod", "courier", "tracking", "shipment", "shipped",
+                "delivered", "consignment", "awb", "airway bill", "tracking number", "received by",
+                "signature", "consignee", "dispatcher", "carrier", "waybill", "fedex", "dhl", "bluedart"
+            ],
+            "label": "Proof of Delivery"
+        }
+    }
+
+    normalized_key = (doc_type_key or "").upper().replace("-", "_").strip()
+    profile = PROFILES.get(normalized_key)
+    target_label = doc_type_label or (profile["label"] if profile else normalized_key)
+
+    matched_keywords = []
+    if profile:
+        for kw in profile["keywords"]:
+            if kw in extracted_lower or kw in fname_lower:
+                matched_keywords.append(kw)
+
+        # Cross-category mismatch check (e.g. uploaded invoice when GOVT_ID was requested)
+        for other_key, other_prof in PROFILES.items():
+            if other_key != normalized_key:
+                other_hits = [kw for kw in other_prof["keywords"] if kw in extracted_lower or kw in fname_lower]
+                if len(other_hits) >= 2 and len(matched_keywords) == 0:
+                    return {
+                        "is_relevant": False,
+                        "confidence": 0.88,
+                        "detected_type": other_key,
+                        "reason": f"File appears to be a '{other_prof['label']}' rather than the requested '{target_label}'."
+                    }
+
+    if len(matched_keywords) > 0:
+        return {
+            "is_relevant": True,
+            "confidence": min(0.75 + (0.05 * len(matched_keywords)), 0.98),
+            "detected_type": normalized_key,
+            "reason": f"Document content verified as relevant for '{target_label}' (matched: {', '.join(matched_keywords[:4])})."
+        }
+
+    # Check filename tokens against target label words
+    target_tokens = [t.lower() for t in re.split(r"[\s/_(),.-]+", target_label) if len(t) > 3]
+    fname_token_matches = [t for t in target_tokens if t in fname_lower]
+    if fname_token_matches:
+        return {
+            "is_relevant": True,
+            "confidence": 0.85,
+            "detected_type": normalized_key,
+            "reason": f"Filename '{filename}' indicates relevant '{target_label}' documentation."
+        }
+
+    # Attempt AI evaluation via LLMProviderFactory if available
+    try:
+        from app.services.llm_provider import LLMProviderFactory, extract_json_from_llm_response
+        provider = LLMProviderFactory.get_provider()
+        sample_snippet = extracted_text[:1500] if extracted_text else f"Uploaded file '{filename}' ({ext}, size: {len(file_bytes)} bytes)"
+        ai_prompt = (
+            f"You are a strict compliance document verification officer.\n"
+            f"A customer uploaded a file named '{filename}' with content preview:\n"
+            f"`\n{sample_snippet}\n`\n\n"
+            f"Requested Document Type: '{target_label}' (Category: {normalized_key}).\n\n"
+            f"Is this uploaded document relevant and acceptable for '{target_label}'?\n"
+            f"Respond ONLY in valid JSON with these exact keys:\n"
+            f'{{"is_relevant": true or false, "confidence": 0.0 to 1.0, "detected_type": "string", "reason": "concise 1-sentence reason"}}'
+        )
+        ai_resp = provider.generate(ai_prompt, json_mode=True)
+        ai_data = extract_json_from_llm_response(ai_resp)
+        if isinstance(ai_data, dict) and "is_relevant" in ai_data:
+            return {
+                "is_relevant": bool(ai_data.get("is_relevant")),
+                "confidence": float(ai_data.get("confidence", 0.85)),
+                "detected_type": str(ai_data.get("detected_type", normalized_key)),
+                "reason": str(ai_data.get("reason", f"Evaluated for {target_label}."))
+            }
+    except Exception as ai_err:
+        logger.info(f"AI relevance check fallback: {ai_err}")
+
+    # Fallback heuristic: If format and size are genuine and no negative indicators
+    if len(file_bytes) > 1000 and ext in {".png", ".jpg", ".jpeg", ".webp", ".pdf"}:
+        return {
+            "is_relevant": True,
+            "confidence": 0.72,
+            "detected_type": normalized_key,
+            "reason": f"File '{filename}' format and structure are valid for '{target_label}'."
+        }
+
+    return {
+        "is_relevant": False,
+        "confidence": 0.50,
+        "detected_type": "UNKNOWN",
+        "reason": f"Could not verify relevance of '{filename}' for '{target_label}'. Please provide an authentic document."
+    }
+
+@portal_bp.route("/validate-document", methods=["POST"])
+def validate_document_endpoint():
+    """
+    Validates whether an attached document is relevant to the target document type
+    before the customer completes upload.
+    """
+    file = request.files.get("file")
+    if not file or not file.filename:
+        return jsonify({"is_relevant": False, "confidence": 0.0, "detected_type": "NONE", "reason": "No file uploaded."}), 400
+
+    doc_type_key = request.form.get("doc_type_key", "").strip()
+    doc_type_label = request.form.get("doc_type_label", "").strip()
+
+    file_bytes = file.read()
+    if len(file_bytes) > MAX_FILE_SIZE_BYTES:
+        return jsonify({
+            "is_relevant": False,
+            "confidence": 0.0,
+            "detected_type": "TOO_LARGE",
+            "reason": f"File exceeds maximum allowed size of 10MB ({len(file_bytes)} bytes)."
+        }), 400
+
+    verdict = validate_document_relevance_internal(file_bytes, file.filename, doc_type_key, doc_type_label)
+    return jsonify(verdict), 200
 
 # ==============================================================================
 # ADMIN: Evidence Request Dispatch & Tracking
@@ -204,6 +401,10 @@ def admin_request_evidence(case_id):
 def get_case_evidence_requests(case_id):
     """Returns list of evidence requests issued for this case."""
     requests_list = EvidenceRequestToken.query.filter_by(case_id=case_id).order_by(EvidenceRequestToken.created_at.desc()).all()
+    for r in requests_list:
+        if r.status == "ISSUED" and r.is_expired():
+            r.status = "EXPIRED"
+    db.session.commit()
     return jsonify({
         "case_id": case_id,
         "items": [r.to_dict() for r in requests_list]
@@ -446,6 +647,15 @@ def portal_submit_evidence():
     if not case:
         return jsonify({"error": "Not Found", "message": "Associated investigation case not found."}), 404
 
+    # Parse doc_types_metadata if sent
+    raw_meta = request.form.get("doc_types_metadata", "")
+    doc_types_meta = {}
+    if raw_meta:
+        try:
+            doc_types_meta = json.loads(raw_meta)
+        except Exception as e:
+            logger.warning(f"Error parsing doc_types_metadata: {e}")
+
     # Extract user form fields
     claimed_amount = request.form.get("claimed_amount", "").strip()
     transaction_date = request.form.get("transaction_date", "").strip()
@@ -508,9 +718,15 @@ def portal_submit_evidence():
         is_image = ext in {".png", ".jpg", ".jpeg", ".webp"}
         evidence_type = "USER_PORTAL_IMAGE" if is_image else "USER_PORTAL_DOCUMENT"
 
+        meta_info = doc_types_meta.get(orig_filename) or {}
+        doc_key = meta_info.get("key") or "USER_PORTAL_DOCUMENT"
+        doc_label = meta_info.get("label") or ("Photo Evidence" if is_image else "Document Evidence")
+
         normalized_payload = {
             "original_filename": orig_filename,
             "saved_filename": saved_filename,
+            "document_type_key": doc_key,
+            "document_type_label": doc_label,
             "file_url": f"/api/v1/investigations/{case.id}/evidence-file/{saved_filename}",
             "file_size_bytes": file_size,
             "content_type": file.mimetype or ("image/" + ext[1:] if is_image else "application/pdf"),
@@ -523,7 +739,7 @@ def portal_submit_evidence():
         evidence = CaseEvidence(
             id=str(uuid.uuid4()),
             case_id=case.id,
-            evidence_type=evidence_type,
+            evidence_type=doc_key if doc_key != "UNKNOWN" else evidence_type,
             source_system="CUSTOMER_EVIDENCE_PORTAL",
             source_reference=orig_filename,
             retrieval_status="COLLECTED",
@@ -572,6 +788,21 @@ def portal_submit_evidence():
 
     db.session.commit()
 
+    docs_for_audit = []
+    for ev in saved_evidence_items:
+        if ev.evidence_type != "USER_TRANSACTION_STATEMENT":
+            payload = ev.normalized_payload or {}
+            docs_for_audit.append({
+                "document_type": payload.get("document_type_label") or ev.evidence_type,
+                "document_type_key": payload.get("document_type_key"),
+                "original_filename": payload.get("original_filename") or ev.source_reference,
+                "saved_filename": payload.get("saved_filename"),
+                "file_url": payload.get("file_url"),
+                "content_type": payload.get("content_type"),
+                "is_image": payload.get("is_image", False),
+                "file_size_bytes": payload.get("file_size_bytes", 0)
+            })
+
     # Record Immutable Audit Event
     AuditService.record_event(
         event_type="EVIDENCE_SUBMITTED_BY_USER",
@@ -582,7 +813,8 @@ def portal_submit_evidence():
         actor_id=req_token.user_id,
         details={
             "request_token_id": req_token.id,
-            "files_count": len(saved_evidence_items) - 1,
+            "files_count": len(docs_for_audit),
+            "documents": docs_for_audit,
             "evidence_ids": [e.id for e in saved_evidence_items],
             "statement_hash": statement_hash,
             "ip_address": request.remote_addr or "127.0.0.1",

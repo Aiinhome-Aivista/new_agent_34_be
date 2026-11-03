@@ -349,7 +349,18 @@ def upload_evidence_file(case_id):
             "saved_filename": saved_filename,
             "file_size": file_size,
             "notes": notes,
-            "user_id": case.user_id_ref
+            "user_id": case.user_id_ref,
+            "documents": [
+                {
+                    "document_type": notes or "Direct Analyst Upload",
+                    "original_filename": orig_filename,
+                    "saved_filename": saved_filename,
+                    "file_url": f"/api/v1/investigations/{case_id}/evidence-file/{saved_filename}",
+                    "content_type": file.mimetype or ("image/" + ext[1:] if is_image else "application/pdf"),
+                    "is_image": is_image,
+                    "file_size_bytes": file_size
+                }
+            ]
         }
     )
 
