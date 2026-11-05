@@ -459,6 +459,7 @@ Required JSON Structure:
         # Phase 3: Knowledgebase intelligence grounding inputs
         rule_evaluation_results: Dict[str, Any] = None,
         historical_patterns: List[Dict[str, Any]] = None,
+        evidence_lifecycle: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """
         Executes LLM reasoning across configured provider with guaranteed fallback.
@@ -477,6 +478,7 @@ Required JSON Structure:
             missing_evidence=missing_evidence,
             rule_evaluation_results=rule_evaluation_results or {},
             historical_patterns=historical_patterns or [],
+            evidence_lifecycle=evidence_lifecycle,
         )
 
         # Prominent Terminal Logging for Investigation Reasoning
@@ -574,6 +576,7 @@ Required JSON Structure:
             retrieved_policies=retrieved_policies,
             rule_evaluation_results=rule_evaluation_results,
             historical_patterns=historical_patterns,
+            evidence_lifecycle=evidence_lifecycle,
         )
 
     @classmethod
@@ -588,6 +591,7 @@ Required JSON Structure:
         retrieved_policies: list,
         rule_evaluation_results: dict,
         historical_patterns: list,
+        evidence_lifecycle: dict = None,
     ) -> dict:
         """
         Grounded deterministic fallback synthesis when external LLM provider is unavailable (503 / timeout).
@@ -612,7 +616,30 @@ Required JSON Structure:
                 "evidence_references": []
             })
 
-        if highest_severity == "CRITICAL" or total_score >= 0.35:
+        # Check if user profile is already BLOCKED or SUSPENDED
+        is_user_blocked_in_db = False
+        target_user_status = None
+        for item in (evidence_items or []):
+            if item.get("evidence_type") == "USER_PROFILE":
+                payload = item.get("normalized_payload") or {}
+                target_user_status = payload.get("status")
+                if target_user_status in ["BLOCKED", "SUSPENDED", "LOCKED"]:
+                    is_user_blocked_in_db = True
+                break
+
+        if is_user_blocked_in_db or (priority == "CRITICAL" and "CURRENTLY BLOCKED" in trigger_reason):
+            assessment = "SUSPICIOUS"
+            recommendation = "BLOCK_USER"
+            confidence = "HIGH"
+        elif evidence_lifecycle and (evidence_lifecycle.get("token_status") == "SUBMITTED" or evidence_lifecycle.get("status") == "SUBMITTED"):
+            assessment = "NOT_SUBSTANTIATED"
+            recommendation = "UNLOCK_USER"
+            confidence = "HIGH"
+        elif evidence_lifecycle and (evidence_lifecycle.get("token_status") in ["ISSUED", "PENDING", "ACCESSED"]):
+            assessment = "INCONCLUSIVE"
+            recommendation = "TEMPORARY_RESTRICTION"
+            confidence = "MEDIUM"
+        elif highest_severity == "CRITICAL" or total_score >= 0.35:
             assessment = "SUSPICIOUS"
             recommendation = "BLOCK_USER" if any(r.get("rule_id") == "FR-001" for r in triggered) else "BLOCK_TRANSACTION"
             confidence = "HIGH"
@@ -660,6 +687,7 @@ Required JSON Structure:
         # Phase 3 grounding inputs
         rule_evaluation_results: Dict[str, Any] = None,
         historical_patterns: List[Dict[str, Any]] = None,
+        evidence_lifecycle: Dict[str, Any] = None,
     ) -> str:
         prompt_sections = [
             f"CASE METADATA:",
@@ -740,6 +768,46 @@ Required JSON Structure:
                     f"- Case {hp.get('case_id','?')} | Disposition: {hp.get('final_disposition')} "
                     f"| Rules: {hp.get('triggered_rule_ids')} | Notes: {hp.get('analyst_notes','')[:120]}"
                 )
+
+        # Check if user profile is already BLOCKED or SUSPENDED
+        is_user_blocked_in_db = False
+        target_user_status = None
+        for item in (evidence_items or []):
+            if item.get("evidence_type") == "USER_PROFILE":
+                payload = item.get("normalized_payload") or {}
+                target_user_status = payload.get("status")
+                if target_user_status in ["BLOCKED", "SUSPENDED", "LOCKED"]:
+                    is_user_blocked_in_db = True
+                break
+
+        if is_user_blocked_in_db or (priority == "CRITICAL" and "CURRENTLY BLOCKED" in trigger_reason):
+            prompt_sections.append("")
+            prompt_sections.append("CRITICAL INSTRUCTION - TARGET ENTITY IN BLOCKED / ENFORCED STATUS:")
+            prompt_sections.append(f"- The target user is CURRENTLY recorded with status '{target_user_status or 'BLOCKED'}' in master table m_users.")
+            prompt_sections.append("- This entity was previously investigated and placed under enforcement. Any subsequent activity represents repeated or unauthorized access attempts.")
+            prompt_sections.append("- Your assessment MUST be 'SUSPICIOUS' and recommendation MUST be 'BLOCK_USER' (Maintain Hard Block) or 'ESCALATE'.")
+            prompt_sections.append("- You MUST explicitly cite in your explanation that the user is currently locked/blocked in the master database.")
+
+        # Check evidence & verification lifecycle
+        if evidence_lifecycle:
+            tok_status = evidence_lifecycle.get("token_status") or evidence_lifecycle.get("status")
+            req_docs = evidence_lifecycle.get("requested_documents", [])
+            submitted_at = evidence_lifecycle.get("submitted_at")
+            sub_payload = evidence_lifecycle.get("submission_payload") or {}
+            user_exp = sub_payload.get("user_explanation", "")
+
+            prompt_sections.append("")
+            prompt_sections.append("CUSTOMER VERIFICATION / EVIDENCE LIFECYCLE:")
+            if tok_status == "SUBMITTED":
+                prompt_sections.append(f"- Verification Documents: SUBMITTED via Customer Evidence Portal on {submitted_at or 'recently'}.")
+                prompt_sections.append(f"- Requested Types: {', '.join(req_docs) if req_docs else 'Identity verification'}")
+                if user_exp:
+                    prompt_sections.append("- Customer Explanation: " + repr(user_exp))
+                prompt_sections.append("- INSTRUCTION: The customer has provided the requested evidence documents. Evaluate whether this counter-evidence resolves the initial suspicion. If satisfactory and valid, recommend 'UNLOCK_USER' or 'NO_ACTION'. If suspicious or counterfeit, recommend 'BLOCK_USER' or 'ESCALATE'.")
+            elif tok_status in ["ISSUED", "ACCESSED", "VERIFIED", "PENDING"]:
+                prompt_sections.append(f"- Verification Documents: PENDING (Customer has NOT yet uploaded required verification documents).")
+                prompt_sections.append(f"- Requested Types: {', '.join(req_docs) if req_docs else 'Govt ID / Proof of Address'}")
+                prompt_sections.append("- INSTRUCTION: Because mandatory evidence is still pending, you MUST recommend 'TEMPORARY_RESTRICTION' or 'HOLD_TRANSACTION'. Do NOT recommend account unlock or transaction clearance until evidence is uploaded.")
 
         prompt_sections.append("Synthesize the case and output your structured decision JSON now:")
         return "\n".join(prompt_sections)

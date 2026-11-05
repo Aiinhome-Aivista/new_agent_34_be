@@ -42,6 +42,7 @@ class InvestigationState(TypedDict):
 
     # Layer 4: Historical intelligence from past confirmed cases
     historical_patterns: List[Dict[str, Any]]
+    evidence_lifecycle: Optional[Dict[str, Any]]
 
     # ----------------------------------------------------------------
     # LLM Synthesis Output (node_reason_llm)

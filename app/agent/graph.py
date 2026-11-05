@@ -107,6 +107,27 @@ def node_collect_evidence(state: InvestigationState) -> Dict[str, Any]:
             device_id = content["device_id"]
             break
 
+    # Check customer verification / evidence portal token lifecycle
+    from app.models.investigation import EvidenceRequestToken
+    evidence_lifecycle = None
+    token = None
+    try:
+        token = EvidenceRequestToken.query.filter_by(case_id=state["case_id"]).order_by(EvidenceRequestToken.created_at.desc()).first()
+        if not token and state.get("user_id"):
+            token = EvidenceRequestToken.query.filter_by(user_id=state["user_id"]).order_by(EvidenceRequestToken.created_at.desc()).first()
+    except Exception as tok_err:
+        logger.warning(f"EvidenceRequestToken query note: {tok_err}")
+
+    if token:
+        evidence_lifecycle = {
+            "token_status": token.status,
+            "requested_documents": token.requested_documents or [],
+            "request_reason": token.request_reason,
+            "requested_by": token.requested_by,
+            "submitted_at": token.submitted_at.isoformat() if token.submitted_at else None,
+            "submission_payload": token.submission_payload or {},
+        }
+
     return {
         "evidence_items": items,
         "missing_evidence": missing,
@@ -114,6 +135,7 @@ def node_collect_evidence(state: InvestigationState) -> Dict[str, Any]:
         # Pass enriched context for downstream parallel nodes
         "_user_profile": user_profile,
         "_device_id": device_id,
+        "evidence_lifecycle": evidence_lifecycle,
     }
 
 
@@ -241,6 +263,7 @@ def node_reason_llm(state: InvestigationState) -> Dict[str, Any]:
         # Phase 3 additions — grounding inputs
         rule_evaluation_results=state.get("rule_evaluation_results", {}),
         historical_patterns=state.get("historical_patterns", []),
+        evidence_lifecycle=state.get("evidence_lifecycle"),
     )
 
     return {

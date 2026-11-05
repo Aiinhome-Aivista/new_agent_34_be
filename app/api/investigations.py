@@ -44,7 +44,80 @@ def create_investigation():
     try:
         case, is_duplicate = CaseService.process_trigger(trigger_req)
         
-        # If not duplicate, trigger investigation workflow
+        # Check if target user is already in BLOCKED status in master directory (Fast-Path Hard Reject)
+        from app.models.source_domain import MUser
+        from app.models.investigation import Recommendation
+        from app.services.audit_service import AuditService
+        
+        is_user_already_blocked = False
+        target_user_display = trigger_req.user_id
+        if trigger_req.user_id:
+            m_user = MUser.query.filter_by(user_id=trigger_req.user_id).first()
+            if m_user and m_user.status == "BLOCKED":
+                is_user_already_blocked = True
+                target_user_display = m_user.name or trigger_req.user_id
+
+        if is_user_already_blocked:
+            # Fast-Path Enforcement: Immediate Gateway Hard Reject without LLM delay
+            case.priority = "CRITICAL"
+            case.status = "ACTION_AUTHORIZED"
+            case.trigger_reason = f"[FAST-PATH HARD REJECT] Target user '{trigger_req.user_id}' is CURRENTLY BLOCKED in master directory due to previous fraud enforcement."
+            
+            if not case.recommendations:
+                fast_path_explanation = (
+                    f"Fast-Path Gateway Enforcement: Target user '{trigger_req.user_id}' ({target_user_display}) has an active BLOCKED status in master m_users directory. "
+                    f"Repeat transaction attempt hard-rejected immediately at gateway layer without LLM latency."
+                )
+                fast_rec = Recommendation(
+                    id=str(uuid.uuid4()),
+                    case_id=case.id,
+                    assessment="CONFIRMED_FRAUD",
+                    recommendation_type="BLOCK_USER",
+                    explanation=fast_path_explanation,
+                    confidence_label="HIGH",
+                    human_review_required=True,
+                    model_name="FastPath Gateway Enforcement",
+                    prompt_version="1.0",
+                    policy_version="1.0",
+                    structured_result={
+                        "summary": fast_path_explanation,
+                        "recommended_action": "BLOCK_USER",
+                        "risk_score": 1.0,
+                        "confidence": 1.0,
+                        "enforcement_note": "Target is already in BLOCKED status in m_users"
+                    },
+                    created_at=utc_now()
+                )
+                db.session.add(fast_rec)
+                db.session.commit()
+
+            AuditService.record_event(
+                event_type="FAST_PATH_HARD_REJECT",
+                actor_type="SYSTEM_GATEKEEPER",
+                correlation_id=case.idempotency_key,
+                case_id=case.id,
+                user_id=trigger_req.user_id,
+                actor_id="GATEWAY_ENFORCEMENT",
+                details={
+                    "target_user_id": trigger_req.user_id,
+                    "reason": "Target user is currently BLOCKED in master directory",
+                    "recommended_action": "BLOCK_USER",
+                    "enforcement": "HARD_REJECT"
+                }
+            )
+
+            response_data = TriggerResponse(
+                case_id=case.id,
+                status="ACTION_AUTHORIZED",
+                priority="CRITICAL",
+                idempotency_key=case.idempotency_key,
+                is_duplicate=is_duplicate,
+                message="[FAST-PATH HARD REJECT] Target user is currently BLOCKED in master directory. Transaction hard-rejected immediately.",
+                created_at=case.created_at.isoformat()
+            )
+            return jsonify(response_data.model_dump()), 201 if not is_duplicate else 200
+
+        # If not duplicate and not fast-path blocked, trigger normal investigation workflow
         if not is_duplicate:
             try:
                 execute_case_investigation(case.id)
@@ -228,6 +301,35 @@ def submit_decision(case_id):
         case.status = "CLOSED"
 
     db.session.commit()
+
+    # Record historical precedent snapshot for Layer 4 intelligence retrieval
+    try:
+        from app.models.knowledgebase import InvestigationHistorySnapshot
+        disposition = "FRAUD_CONFIRMED" if dec_req.decision in ["LOCK_USER", "BLOCK_USER"] else (
+            "FALSE_POSITIVE" if dec_req.decision in ["UNLOCK_USER", "DISMISS", "REJECT"] else dec_req.decision
+        )
+        rec_res = latest_rec.structured_result if (latest_rec and latest_rec.structured_result) else {}
+        triggered_ids = [r.get("rule_id") for r in rec_res.get("risk_indicators", []) if isinstance(r, dict) and r.get("rule_id")]
+        risk_score = float(rec_res.get("total_risk_score", 0.0)) if rec_res else 0.0
+
+        snapshot = InvestigationHistorySnapshot(
+            id=str(uuid.uuid4()),
+            case_id=case_id,
+            user_id=case.user_id_ref,
+            merchant_id=case.merchant_id_ref,
+            final_disposition=disposition,
+            triggered_rule_ids=triggered_ids,
+            final_risk_score=risk_score,
+            confidence_label=latest_rec.confidence_label if latest_rec else "MEDIUM",
+            analyst_notes=f"Decision: {dec_req.decision} | Justification: {dec_req.reason} | Reviewer: {reviewer.display_name}",
+            policy_version_used="1.0",
+            rule_engine_version="1.0.0"
+        )
+        db.session.add(snapshot)
+        db.session.commit()
+        logger.info(f"Recorded InvestigationHistorySnapshot for case {case_id} (disposition: {disposition})")
+    except Exception as snap_err:
+        logger.warning(f"Failed to record history snapshot: {snap_err}")
 
     # Record Immutable Audit Event with user_id & exact reviewer inputs
     AuditService.record_event(

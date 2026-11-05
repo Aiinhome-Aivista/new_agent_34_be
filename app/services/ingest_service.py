@@ -301,20 +301,25 @@ class IngestService:
                 ingested_count += 1
 
                 # 3. Compute Dynamic Priority based on master domain state & policy signals
+                is_currently_blocked = (user.status == "BLOCKED")
                 is_high_risk = (
+                    is_currently_blocked or
                     user.risk_level == "HIGH" or
                     user.kyc_status in ["REJECTED", "NOT_STARTED"] or
                     chargebacks_count > 0 or
                     (user.risk_score and float(user.risk_score) >= 70.0) or
                     any(term in (raw_reason or "").lower() for term in ["fraud", "suspicious", "stolen", "decline", "emulator", "ring", "chargeback"])
                 )
-                priority = "HIGH" if is_high_risk else "MEDIUM"
+                priority = "CRITICAL" if is_currently_blocked else ("HIGH" if is_high_risk else "MEDIUM")
 
-                # 4. Enrich Trigger Reason with Master Tables Evidence Context
+                # 4. Enrich Trigger Reason with Master Tables Evidence Context & Lock Persistence
                 base_reason = raw_reason.strip() if raw_reason else "Batch Ingestion User Audit"
+                if is_currently_blocked:
+                    base_reason = f"[REPEAT OFFENDER ALERT] Target user is CURRENTLY BLOCKED due to previous enforcement. | {base_reason}"
+
                 user_display = f"{user.first_name or ''} {user.last_name or ''}".strip() or user.user_id
                 enriched_reason = (
-                    f"{base_reason} | Target: {user.user_id} ({user_display}) | "
+                    f"{base_reason} | Target: {user.user_id} ({user_display}) | Status: {user.status} | "
                     f"KYC: {user.kyc_status} | Risk Level: {user.risk_level} (Score: {user.risk_score or 0}) | "
                     f"Domain Profile: {orders_count} orders, {payments_count} payments, {chargebacks_count} disputes"
                 )[:495]
@@ -361,7 +366,36 @@ class IngestService:
                     )
 
                     case, is_dup = CaseService.process_trigger(trigger_req)
-                    if not is_dup:
+                    if is_currently_blocked:
+                        case.status = "ACTION_AUTHORIZED"
+                        case.priority = "CRITICAL"
+                        direct_explanation = (
+                            f"Target user '{user.user_id}' ({user_display}) is currently in BLOCKED status in m_users master table due to previous fraud enforcement. "
+                            f"Repeat activity attempt detected. Action: MAINTAIN HARD BLOCK & REJECT."
+                        )
+                        rec = Recommendation(
+                            id=str(uuid.uuid4()),
+                            case_id=case.id,
+                            assessment="CONFIRMED_FRAUD",
+                            recommendation_type="BLOCK_USER",
+                            explanation=direct_explanation,
+                            confidence_label="HIGH",
+                            human_review_required=True,
+                            model_name="FastPath Gateway Enforcement",
+                            prompt_version="1.0",
+                            policy_version="1.0",
+                            structured_result={
+                                "summary": direct_explanation,
+                                "recommended_action": "BLOCK_USER",
+                                "risk_score": 1.0,
+                                "confidence": 1.0,
+                                "enforcement_note": "Target is already in BLOCKED status"
+                            },
+                            created_at=utc_now()
+                        )
+                        db.session.add(rec)
+                        db.session.commit()
+                    elif not is_dup:
                         try:
                             execute_case_investigation(case.id)
                         except Exception as inv_err:
