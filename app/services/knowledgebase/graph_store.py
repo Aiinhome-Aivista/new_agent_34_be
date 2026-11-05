@@ -244,6 +244,8 @@ class GraphStoreService:
             "shared_ips": [],
             "merchant_connections": [],
             "total_graph_risk_signals": 0,
+            "device_ban_evasion_detected": False,
+            "tainted_devices_count": 0,
             "traversal_note": "",
         }
 
@@ -280,10 +282,35 @@ class GraphStoreService:
 
             if sharing_users:
                 shared_account_ids = [r.source_id for r in sharing_users]
+                from app.models.source_domain import MUser
+                blocked_accounts = []
+                try:
+                    blocked_m_users = MUser.query.filter(
+                        MUser.user_id.in_(shared_account_ids),
+                        MUser.status == "BLOCKED"
+                    ).all()
+                    for bu in blocked_m_users:
+                        blocked_accounts.append({
+                            "user_id": bu.user_id,
+                            "name": bu.name or bu.user_id,
+                            "email": bu.email,
+                            "status": bu.status
+                        })
+                except Exception as b_err:
+                    logger.warning(f"[GraphStore] Blocked user lookup note: {b_err}")
+
+                is_tainted = len(blocked_accounts) > 0
+                if is_tainted:
+                    result["device_ban_evasion_detected"] = True
+                    result["tainted_devices_count"] += 1
+                    result["total_graph_risk_signals"] += 10
+
                 result["shared_devices"].append({
                     "device_id": device_id,
                     "shared_account_count": len(shared_account_ids),
                     "accounts": shared_account_ids,
+                    "is_tainted_device": is_tainted,
+                    "blocked_accounts": blocked_accounts
                 })
                 result["total_graph_risk_signals"] += len(shared_account_ids)
 
@@ -315,6 +342,8 @@ class GraphStoreService:
             result["merchant_connections"] = [r.source_id for r in merchant_users]
 
         note_parts = []
+        if result.get("device_ban_evasion_detected"):
+            note_parts.append("🚨 CRITICAL: Hardware device is linked to BLOCKED fraud entity (Ban Evasion detected)")
         if result["shared_devices"]:
             note_parts.append(f"{len(result['shared_devices'])} shared device(s) detected")
         if result["shared_ips"]:

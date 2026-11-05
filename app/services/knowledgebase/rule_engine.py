@@ -77,16 +77,43 @@ class RuleEvaluators:
             return _rule_result(rule, triggered=False, observed_value=0,
                                 note="No device_id present in evidence.")
 
-        # Count unique users who used this device
-        count = db.session.query(EntityRelationship).filter(
+        # Query all relationships for this device
+        sharing_rels = db.session.query(EntityRelationship).filter(
             EntityRelationship.target_id == device_id,
             EntityRelationship.relation_type == "USED_DEVICE"
-        ).count()
+        ).all()
 
-        triggered = count >= int(rule.threshold_value)
+        all_account_ids = list({r.source_id for r in sharing_rels})
+        count = len(all_account_ids)
+        current_user_id = evidence.get("user_id")
+        other_user_ids = [uid for uid in all_account_ids if uid != current_user_id]
+
+        # Check if ANY other account on this device is BLOCKED
+        has_blocked_user = False
+        blocked_names = []
+        if other_user_ids:
+            try:
+                from app.models.source_domain import MUser
+                blocked_users = MUser.query.filter(
+                    MUser.user_id.in_(other_user_ids),
+                    MUser.status == "BLOCKED"
+                ).all()
+                if blocked_users:
+                    has_blocked_user = True
+                    blocked_names = [f"{u.user_id} ({u.name or 'Blocked'})" for u in blocked_users]
+            except Exception as b_err:
+                logger.warning(f"[RuleEngine] Error checking blocked users on device: {b_err}")
+
+        triggered = (count >= int(rule.threshold_value)) or has_blocked_user
+
+        if has_blocked_user:
+            note = f"🚨 DEVICE BAN EVASION DETECTED: Hardware device '{device_id}' is shared with BLOCKED fraud account(s): {', '.join(blocked_names)}. Total accounts on hardware: {count}."
+        else:
+            note = f"Device '{device_id}' linked to {count} account(s). Threshold: {int(rule.threshold_value)}."
+
         return _rule_result(
             rule, triggered=triggered, observed_value=count,
-            note=f"Device '{device_id}' linked to {count} account(s). Threshold: {int(rule.threshold_value)}."
+            note=note
         )
 
     @staticmethod

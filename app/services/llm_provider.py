@@ -627,10 +627,27 @@ Required JSON Structure:
                     is_user_blocked_in_db = True
                 break
 
+        device_ban_evasion = (
+            (graph_analysis or {}).get("device_ban_evasion_detected") or
+            any(d.get("is_tainted_device") for d in (graph_analysis or {}).get("shared_devices", []))
+        )
+
         if is_user_blocked_in_db or (priority == "CRITICAL" and "CURRENTLY BLOCKED" in trigger_reason):
             assessment = "SUSPICIOUS"
             recommendation = "BLOCK_USER"
             confidence = "HIGH"
+        elif device_ban_evasion:
+            assessment = "SUSPICIOUS"
+            recommendation = "BLOCK_USER"
+            confidence = "HIGH"
+            tainted_devices = [d for d in (graph_analysis or {}).get("shared_devices", []) if d.get("is_tainted_device")]
+            for td in tainted_devices:
+                dev_id = td.get("device_id")
+                blocked_accs = [f"{b.get('user_id')} ({b.get('name')})" for b in td.get("blocked_accounts", [])]
+                risk_indicators.append({
+                    "statement": f"🚨 Hardware Ban Evasion Alert: Device '{dev_id}' is physically linked to BLOCKED fraudster account(s): {', '.join(blocked_accs)}.",
+                    "evidence_references": []
+                })
         elif evidence_lifecycle and (evidence_lifecycle.get("token_status") == "SUBMITTED" or evidence_lifecycle.get("status") == "SUBMITTED"):
             assessment = "NOT_SUBSTANTIATED"
             recommendation = "UNLOCK_USER"
@@ -787,6 +804,25 @@ Required JSON Structure:
             prompt_sections.append("- This entity was previously investigated and placed under enforcement. Any subsequent activity represents repeated or unauthorized access attempts.")
             prompt_sections.append("- Your assessment MUST be 'SUSPICIOUS' and recommendation MUST be 'BLOCK_USER' (Maintain Hard Block) or 'ESCALATE'.")
             prompt_sections.append("- You MUST explicitly cite in your explanation that the user is currently locked/blocked in the master database.")
+
+        # Check for Device-Level Ban Evasion (Hardware Taint from Graph Analysis)
+        device_ban_evasion = (
+            (graph_analysis or {}).get("device_ban_evasion_detected") or
+            any(d.get("is_tainted_device") for d in (graph_analysis or {}).get("shared_devices", []))
+        )
+        if device_ban_evasion:
+            tainted_devices = [d for d in (graph_analysis or {}).get("shared_devices", []) if d.get("is_tainted_device")]
+            prompt_sections.append("")
+            prompt_sections.append("CRITICAL INSTRUCTION - HARDWARE BAN EVASION (DEVICE-LEVEL FRAUD TAINT):")
+            for td in tainted_devices:
+                dev_id = td.get("device_id")
+                blocked_accs = [f"{b.get('user_id')} ({b.get('name')})" for b in td.get("blocked_accounts", [])]
+                prompt_sections.append(
+                    f"- The hardware device '{dev_id}' used in this transaction was previously used by confirmed BLOCKED fraudster(s): {', '.join(blocked_accs)}."
+                )
+            prompt_sections.append("- This indicates an active BAN EVASION attempt (a blocked fraudster creating or operating an alternate account from the same physical hardware).")
+            prompt_sections.append("- Your assessment MUST be 'CONFIRMED_FRAUD' or 'SUSPICIOUS' and recommendation MUST be 'BLOCK_USER'.")
+            prompt_sections.append("- You MUST explicitly cite the tainted device ID and the name/ID of the linked blocked fraudster in your explanation.")
 
         # Check evidence & verification lifecycle
         if evidence_lifecycle:
