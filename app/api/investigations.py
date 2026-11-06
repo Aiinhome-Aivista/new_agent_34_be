@@ -1,5 +1,6 @@
 from app.models.investigation import CaseEvidence
-from app.models.governance import AppUser
+from app.models.governance import AppUser, AppNotification
+from app.models.source_domain import MUser
 import os
 import uuid
 import time
@@ -230,6 +231,16 @@ def submit_decision(case_id):
 
     resolved_reviewer_id = reviewer.id
     reviewer_label = reviewer.display_name or reviewer.identity_subject or dec_req.reviewer_id
+
+    # RBAC Enforcement: If case is in ESCALATED status, ONLY ADMIN or SENIOR_INVESTIGATOR can execute actions or resolve it!
+    if case.status == "ESCALATED":
+        allowed_roles = ["ADMIN", "SENIOR_INVESTIGATOR"]
+        if reviewer.role not in allowed_roles:
+            return jsonify({
+                "error": "Forbidden",
+                "message": f"Case {case.id[:8]} is currently ESCALATED to Senior Fraud Committee. Only Senior Investigators and Administrators are authorized to execute actions (Your persona: {reviewer.role})."
+            }), 403
+
     latest_rec = case.recommendations[-1] if case.recommendations else None
 
     # Persist Review Decision
@@ -279,6 +290,88 @@ def submit_decision(case_id):
 
     elif dec_req.decision == "ESCALATE":
         case.status = "ESCALATED"
+
+        # 1. Lookup Target Customer Details
+        target_user_record = None
+        if case.user_id_ref:
+            try:
+                target_user_record = MUser.query.filter_by(user_id=case.user_id_ref).first()
+            except Exception:
+                pass
+
+        target_name = (
+            f"{getattr(target_user_record, 'first_name', '') or ''} {getattr(target_user_record, 'last_name', '') or ''}".strip()
+            if target_user_record else "Unknown Customer"
+        ) or "Unknown Customer"
+        target_email = getattr(target_user_record, "email", None) if target_user_record else None
+        risk_score = getattr(target_user_record, "risk_score", 0.85) if target_user_record else 0.85
+
+        # 2. Persist In-App Notification for Senior & Admin personas
+        notif = AppNotification(
+            id=str(uuid.uuid4()),
+            recipient_role="SENIOR_AND_ADMIN",
+            case_id=case.id,
+            target_user_id=case.user_id_ref,
+            title=f"🚨 Case Escalated: {case.user_id_ref or case.id[:8]}",
+            message=f"Case was escalated by {reviewer_label} ({reviewer.role}). Reason: {dec_req.reason}",
+            sender_name=reviewer.display_name or reviewer_label,
+            sender_role=reviewer.role,
+            sender_email=reviewer.email,
+            category="ESCALATION",
+            is_read=False
+        )
+        db.session.add(notif)
+
+        # 3. Record Explicit Escalation Audit Event
+        AuditService.record_event(
+            event_type="CASE_ESCALATED",
+            actor_type="HUMAN_REVIEWER",
+            correlation_id=case.idempotency_key,
+            case_id=case.id,
+            user_id=case.user_id_ref,
+            actor_id=reviewer_label,
+            details={
+                "case_id": case.id,
+                "target_user_id": case.user_id_ref,
+                "escalated_by": reviewer_label,
+                "reviewer_role": reviewer.role,
+                "reviewer_email": reviewer.email,
+                "reason": dec_req.reason,
+                "policy_reference": dec_req.policy_reference,
+            }
+        )
+
+        # 4. Dispatch Automated Email Alert to Senior Investigators & Admins
+        try:
+            from app.services.email_service import EmailService
+            senior_and_admin_users = AppUser.query.filter(
+                AppUser.role.in_(["ADMIN", "SENIOR_INVESTIGATOR"]),
+                AppUser.status == "ACTIVE"
+            ).all()
+            recipient_emails = [u.email for u in senior_and_admin_users if u.email and "@" in u.email]
+            if not recipient_emails:
+                recipient_emails = ["priya.sharma@fraudops.ai", "admin@fraudops.ai"]
+
+            EmailService.send_escalation_alert_email(
+                recipients=recipient_emails,
+                case_id=case.id,
+                escalated_by={
+                    "name": reviewer.display_name or reviewer_label,
+                    "email": reviewer.email,
+                    "role": reviewer.role
+                },
+                target_user={
+                    "user_id": case.user_id_ref,
+                    "name": target_name,
+                    "email": target_email,
+                    "risk_score": risk_score
+                },
+                reason=dec_req.reason,
+                policy_reference=dec_req.policy_reference,
+                transaction_details={"transaction_id": case.transaction_id} if case.transaction_id else None
+            )
+        except Exception as email_err:
+            logger.warning(f"Failed to dispatch escalation email alert: {email_err}")
 
     elif dec_req.decision == "MONITOR":
         case.status = "MONITORING"

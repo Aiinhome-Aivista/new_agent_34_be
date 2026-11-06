@@ -5,7 +5,7 @@ from app.models.investigation import (
 )
 from app.models.governance import (
     AppUser, PolicyDocument, FraudParameter, ReviewDecision, ActionRequest,
-    AuditEvent, IntegrationConfig
+    AuditEvent, IntegrationConfig, AppNotification
 )
 from app.models.knowledgebase import (
     EntityNode, EntityRelationship,

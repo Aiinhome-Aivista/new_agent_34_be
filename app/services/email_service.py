@@ -247,3 +247,184 @@ Fraud & Compliance Operations
             logger.error(f"[EMAIL_ERROR] Failed to send OTP email to {to_email}: {e}")
             return {"success": False, "error": str(e)}
 
+    @classmethod
+    def send_escalation_alert_email(
+        cls,
+        recipients: List[str],
+        case_id: str,
+        escalated_by: Dict[str, Any],
+        target_user: Dict[str, Any],
+        reason: str,
+        policy_reference: Optional[str] = None,
+        transaction_details: Optional[Dict[str, Any]] = None,
+        portal_url: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Dispatches an urgent escalation alert email to Senior Fraud Investigators and Admins.
+        Includes complete case telemetry, sender identity, rationale, and direct review link.
+        """
+        valid_recipients = [r for r in recipients if r and "@" in r]
+        if not valid_recipients:
+            logger.warning("[EMAIL] Cannot send escalation alert: no valid recipients provided.")
+            return {"success": False, "error": "No valid recipients"}
+
+        from_email = Config.SMTP_FROM_EMAIL or Config.SMTP_USER
+        subject = f"🚨 [ESCALATION ALERT] Case {case_id[:8]} Requires Senior Committee Review"
+
+        sender_name = escalated_by.get("name") or "Investigator"
+        sender_role = escalated_by.get("role") or "INVESTIGATOR"
+        sender_email = escalated_by.get("email") or "Not provided"
+
+        target_uid = target_user.get("user_id") or "N/A"
+        target_name = target_user.get("name") or "Unknown Customer"
+        target_email = target_user.get("email") or "N/A"
+        risk_score = target_user.get("risk_score", 0.0)
+        risk_pct = f"{int(risk_score * 100)}%" if isinstance(risk_score, (int, float)) else str(risk_score)
+
+        link_url = portal_url or f"{getattr(Config, 'FRONTEND_BASE_URL', 'http://localhost:5173')}/?tab=casedetail&caseId={case_id}"
+
+        txn_html = ""
+        txn_text = ""
+        if transaction_details:
+            t_id = transaction_details.get("transaction_id", "N/A")
+            t_amt = transaction_details.get("amount", 0)
+            t_curr = transaction_details.get("currency", "USD")
+            txn_html = f"""
+            <div style="background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; padding: 12px 16px; margin-top: 12px;">
+              <strong style="color: #0F172A; font-size: 13px;">Associated Transaction:</strong>
+              <div style="font-size: 13px; color: #475569; margin-top: 4px;">ID: <code>{t_id}</code> | Amount: <strong>{t_curr} {t_amt}</strong></div>
+            </div>
+            """
+            txn_text = f"\nAssociated Transaction: {t_id} | Amount: {t_curr} {t_amt}"
+
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>{subject}</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #0B0F19; margin: 0; padding: 24px; color: #1E293B;">
+  <div style="max-width: 620px; margin: 0 auto; background: #FFFFFF; border-radius: 12px; overflow: hidden; border: 1px solid #E2E8F0; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.2);">
+    
+    <!-- Top Urgent Header Banner -->
+    <div style="background: linear-gradient(135deg, #DC2626 0%, #991B1B 100%); padding: 22px 28px; color: #FFFFFF;">
+      <div style="display: flex; align-items: center; justify-content: space-between;">
+        <span style="font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.1em; background: rgba(255,255,255,0.2); padding: 4px 10px; border-radius: 20px;">
+          Senior Committee Priority Escalation
+        </span>
+        <span style="font-size: 12px; font-weight: 600; opacity: 0.9;">Case #{case_id[:8]}</span>
+      </div>
+      <h1 style="margin: 12px 0 4px 0; font-size: 20px; font-weight: 800; letter-spacing: -0.02em;">
+        🚨 Case Escalated for Senior Executive Review
+      </h1>
+      <p style="margin: 0; font-size: 13px; opacity: 0.92;">
+        An investigation has been escalated to Senior Fraud Committee. Immediate executive evaluation and action authorization required.
+      </p>
+    </div>
+
+    <!-- Main Content -->
+    <div style="padding: 28px; font-size: 14px; line-height: 1.6; color: #334155;">
+      
+      <!-- Sender & Escalation metadata card -->
+      <div style="background-color: #FEF2F2; border-left: 4px solid #DC2626; padding: 14px 18px; border-radius: 0 8px 8px 0; margin-bottom: 20px;">
+        <div style="font-size: 12px; font-weight: 700; color: #991B1B; text-transform: uppercase; margin-bottom: 6px;">
+          Escalated By (Sender Details)
+        </div>
+        <div style="font-size: 14px; color: #1E293B;">
+          <strong>{sender_name}</strong> · <span style="background: #FEE2E2; color: #991B1B; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600;">{sender_role}</span>
+        </div>
+        <div style="font-size: 12px; color: #64748B; margin-top: 2px;">
+          Email: <a href="mailto:{sender_email}" style="color: #DC2626; text-decoration: none;">{sender_email}</a>
+        </div>
+      </div>
+
+      <!-- Target Customer Profile -->
+      <h3 style="margin: 18px 0 10px 0; font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; color: #64748B;">
+        Target Entity Details
+      </h3>
+      <table style="width: 100%; border-collapse: collapse; margin-bottom: 16px; font-size: 13px;">
+        <tr style="border-bottom: 1px solid #F1F5F9;">
+          <td style="padding: 8px 0; color: #64748B; width: 140px;">User ID</td>
+          <td style="padding: 8px 0; font-weight: 600; color: #0F172A;"><code>{target_uid}</code></td>
+        </tr>
+        <tr style="border-bottom: 1px solid #F1F5F9;">
+          <td style="padding: 8px 0; color: #64748B;">Customer Name</td>
+          <td style="padding: 8px 0; font-weight: 600; color: #0F172A;">{target_name}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #F1F5F9;">
+          <td style="padding: 8px 0; color: #64748B;">Customer Email</td>
+          <td style="padding: 8px 0; color: #0F172A;">{target_email}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #F1F5F9;">
+          <td style="padding: 8px 0; color: #64748B;">Calculated Risk Score</td>
+          <td style="padding: 8px 0; font-weight: 700; color: #DC2626;">{risk_pct} (CRITICAL)</td>
+        </tr>
+      </table>
+
+      {txn_html}
+
+      <!-- Rationale Box -->
+      <div style="margin-top: 20px; background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; padding: 16px;">
+        <div style="font-size: 12px; font-weight: 700; color: #475569; text-transform: uppercase; margin-bottom: 6px;">
+          Escalation Rationale &amp; Policy Basis
+        </div>
+        <p style="margin: 0; font-size: 13px; color: #1E293B; font-style: italic; white-space: pre-wrap;">
+          "{reason}"
+        </p>
+        {f'<div style="margin-top: 8px; font-size: 11px; color: #64748B;">Policy Ref: <code>{policy_reference}</code></div>' if policy_reference else ''}
+      </div>
+
+      <!-- Action Button -->
+      <div style="text-align: center; margin: 30px 0 16px 0;">
+        <a href="{link_url}" style="display: inline-block; background-color: #0F172A; color: #FFFFFF; font-weight: 700; font-size: 14px; padding: 14px 32px; border-radius: 8px; text-decoration: none; box-shadow: 0 4px 12px rgba(15, 23, 42, 0.25);">
+          Review &amp; Authorize in Escalation Desk →
+        </a>
+      </div>
+
+      <p style="font-size: 12px; color: #94A3B8; text-align: center; margin: 0;">
+        Only Senior Investigators and Administrators hold execution authority on this escalated case.
+      </p>
+    </div>
+
+    <!-- Footer -->
+    <div style="background-color: #F8FAFC; padding: 18px 28px; border-top: 1px solid #E2E8F0; font-size: 11px; color: #94A3B8; text-align: center;">
+      Fraud &amp; Risk Operations Gateway · Automated Senior Alert System · Confidential
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+        text_content = f"""[ESCALATION ALERT] Case #{case_id[:8]} Escalated for Senior Committee Review
+
+Escalated By: {sender_name} ({sender_role}) <{sender_email}>
+Target Entity: User ID: {target_uid} | Name: {target_name} | Email: {target_email} | Risk: {risk_pct}
+{txn_text}
+
+Rationale:
+{reason}
+Policy Ref: {policy_reference or 'N/A'}
+
+Review link: {link_url}
+
+Note: Only Senior Investigators and Administrators hold execution authority on this escalated case.
+"""
+
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = f"Fraud & Risk Escalations <{from_email}>"
+        msg["To"] = ", ".join(valid_recipients)
+        msg.attach(MIMEText(text_content, "plain"))
+        msg.attach(MIMEText(html_content, "html"))
+
+        try:
+            server = cls._create_smtp_connection()
+            server.sendmail(from_email, valid_recipients, msg.as_string())
+            server.quit()
+            logger.info(f"[EMAIL_SUCCESS] Dispatched escalation alert for case {case_id} to {valid_recipients}")
+            return {"success": True, "recipients": valid_recipients}
+        except Exception as e:
+            logger.warning(f"[EMAIL_NOTE] Could not dispatch escalation email via SMTP ({e}). Alert logged for audit.")
+            return {"success": False, "error": str(e), "simulated": True}
+
+

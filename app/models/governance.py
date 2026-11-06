@@ -265,3 +265,40 @@ class IntegrationConfig(db.Model):
             "last_checked_at": self.last_checked_at.isoformat() if self.last_checked_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+
+class AppNotification(db.Model):
+    """In-app notifications for senior investigators, admins, and compliance teams."""
+    __tablename__ = "app_notifications"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    recipient_role = Column(String(50), nullable=True) # E.g. 'ADMIN', 'SENIOR_INVESTIGATOR', 'ALL'
+    recipient_user_id = Column(String(36), nullable=True) # Direct user id if targeted
+    case_id = Column(String(36), ForeignKey("investigation_cases.id"), nullable=True)
+    title = Column(String(200), nullable=False)
+    message = Column(Text, nullable=False)
+    sender_name = Column(String(100), nullable=True)
+    sender_role = Column(String(50), nullable=True)
+    sender_email = Column(String(255), nullable=True)
+    target_user_id = Column(String(100), nullable=True)
+    category = Column(String(50), nullable=False, default="ESCALATION") # 'ESCALATION', 'ACTION', 'SYSTEM'
+    is_read = Column(Boolean, default=False, nullable=False)
+    created_at = Column(TIMESTAMP, default=utc_now, nullable=False)
+
+    case = relationship("InvestigationCase")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "recipient_role": self.recipient_role,
+            "recipient_user_id": self.recipient_user_id,
+            "case_id": self.case_id,
+            "title": self.title,
+            "message": self.message,
+            "sender_name": self.sender_name,
+            "sender_role": self.sender_role,
+            "sender_email": self.sender_email,
+            "target_user_id": self.target_user_id,
+            "category": self.category,
+            "is_read": self.is_read,
+            "created_at": to_utc_iso(self.created_at),
+        }

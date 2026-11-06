@@ -41,6 +41,7 @@ def create_app(config_class=Config):
     from app.api.admin import admin_bp
     from app.api.ingestion import ingestion_bp
     from app.api.portal import portal_bp
+    from app.api.notifications import notifications_bp
 
     app.register_blueprint(health_bp, url_prefix="/api/v1/health")
     app.register_blueprint(investigations_bp, url_prefix="/api/v1/investigations")
@@ -52,6 +53,7 @@ def create_app(config_class=Config):
     app.register_blueprint(admin_bp, url_prefix="/api/v1/admin")
     app.register_blueprint(ingestion_bp, url_prefix="/api/v1/ingest")
     app.register_blueprint(portal_bp, url_prefix="/api/v1/portal")
+    app.register_blueprint(notifications_bp, url_prefix="/api/v1/notifications")
 
     # Seamless redirect: if a customer clicks an evidence link on the backend port (e.g. :3052),
     # automatically 302 redirect them to the frontend port (:5173) so 404 never occurs!
