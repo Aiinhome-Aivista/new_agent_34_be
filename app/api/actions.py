@@ -103,7 +103,8 @@ def get_action_details(action_id):
                 "last_name": user.last_name,
                 "display_name": f"{user.first_name or ''} {user.last_name or ''}".strip() or user.user_id,
                 "email": user.email,
-                "phone": user.phone,
+                "phone": getattr(user, "phone_number", None) or getattr(user, "phone", None),
+                "phone_number": getattr(user, "phone_number", None) or getattr(user, "phone", None),
                 "status": user.status,  # LIVE status in m_users: 'BLOCKED' or 'ACTIVE'
                 "kyc_status": user.kyc_status,
                 "risk_level": user.risk_level,
