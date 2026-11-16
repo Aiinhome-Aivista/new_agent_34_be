@@ -5,7 +5,7 @@ from app.models.investigation import (
 )
 from app.models.governance import (
     AppUser, PolicyDocument, FraudParameter, ReviewDecision, ActionRequest,
-    AuditEvent, IntegrationConfig, AppNotification
+    AuditEvent, IntegrationConfig, AppNotification, MicroserviceApiRegistry
 )
 from app.models.knowledgebase import (
     EntityNode, EntityRelationship,
@@ -33,6 +33,8 @@ __all__ = [
     "ActionRequest",
     "AuditEvent",
     "IntegrationConfig",
+    "AppNotification",
+    "MicroserviceApiRegistry",
     # Knowledgebase (Phase 1)
     "EntityNode",
     "EntityRelationship",

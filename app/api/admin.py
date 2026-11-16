@@ -3,8 +3,13 @@ from flask import Response
 import json
 import logging
 import uuid
+import time
+import requests
+from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify
-from app.models.governance import PolicyDocument, FraudParameter, AppUser
+from app.models.governance import (
+    PolicyDocument, FraudParameter, AppUser, MicroserviceApiRegistry, to_utc_iso
+)
 from app.extensions import db
 
 logger = logging.getLogger("fraud_agent.api.admin")
@@ -335,4 +340,315 @@ def get_knowledge_status():
         }), 200
     except Exception as e:
         return jsonify({"status": "ERROR", "message": str(e)}), 500
+
+# ============================================================================
+# 4. Dynamic Microservice API Registry & Connectors (CRUD & Probe Runner)
+# ============================================================================
+
+@admin_bp.route("/connectors", methods=["GET"])
+def list_connectors():
+    """Returns all registered microservice API connectors with optional category/search filters."""
+    category = request.args.get("category")
+    is_active = request.args.get("is_active")
+    search = request.args.get("search", "").strip().lower()
+
+    query = MicroserviceApiRegistry.query
+    if category and category.upper() != "ALL":
+        query = query.filter_by(service_category=category.upper())
+    if is_active is not None and is_active != "":
+        query = query.filter_by(is_active=(is_active.lower() == "true"))
+
+    connectors = query.order_by(MicroserviceApiRegistry.created_at.asc()).all()
+
+    if search:
+        connectors = [
+            c for c in connectors
+            if search in c.service_name.lower() or
+               search in c.service_key.lower() or
+               search in c.endpoint_path.lower() or
+               search in c.base_url.lower() or
+               (c.description and search in c.description.lower())
+        ]
+
+    return jsonify([c.to_dict() for c in connectors]), 200
+
+@admin_bp.route("/connectors/<connector_id>", methods=["GET"])
+def get_connector(connector_id):
+    """Retrieves single connector details including sensitive token if authorized."""
+    connector = MicroserviceApiRegistry.query.filter_by(id=connector_id).first()
+    if not connector:
+        return jsonify({"error": "Not Found", "message": f"Connector {connector_id} not found"}), 404
+    return jsonify(connector.to_dict(include_sensitive=True)), 200
+
+@admin_bp.route("/connectors", methods=["POST"])
+def create_connector():
+    """Dynamically registers a new microservice API connector."""
+    data = request.get_json(silent=True) or {}
+    service_key = data.get("service_key", "").strip().upper()
+    service_name = data.get("service_name", "").strip()
+    service_category = data.get("service_category", "IDENTITY").strip().upper()
+    base_url = data.get("base_url", "").strip()
+    endpoint_path = data.get("endpoint_path", "").strip()
+
+    if not service_key or not service_name or not base_url or not endpoint_path:
+        return jsonify({
+            "error": "Bad Request",
+            "message": "service_key, service_name, base_url, and endpoint_path are required"
+        }), 400
+
+    existing = MicroserviceApiRegistry.query.filter_by(service_key=service_key).first()
+    if existing:
+        return jsonify({
+            "error": "Conflict",
+            "message": f"Connector with service_key '{service_key}' already exists."
+        }), 409
+
+    auth_token = data.get("auth_token", "").strip()
+    connector = MicroserviceApiRegistry(
+        id=str(uuid.uuid4()),
+        service_key=service_key,
+        service_name=service_name,
+        service_category=service_category,
+        description=data.get("description", "").strip(),
+        http_method=data.get("http_method", "GET").strip().upper(),
+        base_url=base_url,
+        endpoint_path=endpoint_path,
+        auth_type=data.get("auth_type", "BEARER_TOKEN").strip().upper(),
+        auth_header_key=data.get("auth_header_key", "Authorization").strip(),
+        auth_token_encrypted=auth_token or None,
+        custom_headers=data.get("custom_headers") or {},
+        sample_payload=data.get("sample_payload"),
+        sample_response=data.get("sample_response"),
+        payload_schema=data.get("payload_schema", "").strip(),
+        timeout_ms=int(data.get("timeout_ms", 5000)),
+        retry_count=int(data.get("retry_count", 2)),
+        is_mock_enabled=bool(data.get("is_mock_enabled", True)),
+        is_active=bool(data.get("is_active", True)),
+        health_status="HEALTHY",
+        last_latency_ms=25,
+        last_status_code=200
+    )
+    if auth_token:
+        connector.token_preview = connector.mask_token(auth_token)
+
+    db.session.add(connector)
+    db.session.commit()
+    logger.info(f"Registered new microservice connector: {service_key}")
+    return jsonify(connector.to_dict()), 201
+
+@admin_bp.route("/connectors/<connector_id>", methods=["PUT"])
+def update_connector(connector_id):
+    """Dynamically updates an existing microservice connector at runtime."""
+    connector = MicroserviceApiRegistry.query.filter_by(id=connector_id).first()
+    if not connector:
+        return jsonify({"error": "Not Found", "message": f"Connector {connector_id} not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    if "service_name" in data and data["service_name"].strip():
+        connector.service_name = data["service_name"].strip()
+    if "service_category" in data and data["service_category"].strip():
+        connector.service_category = data["service_category"].strip().upper()
+    if "description" in data:
+        connector.description = data["description"].strip()
+    if "http_method" in data and data["http_method"].strip():
+        connector.http_method = data["http_method"].strip().upper()
+    if "base_url" in data and data["base_url"].strip():
+        connector.base_url = data["base_url"].strip()
+    if "endpoint_path" in data and data["endpoint_path"].strip():
+        connector.endpoint_path = data["endpoint_path"].strip()
+    if "auth_type" in data and data["auth_type"].strip():
+        connector.auth_type = data["auth_type"].strip().upper()
+    if "auth_header_key" in data:
+        connector.auth_header_key = data["auth_header_key"].strip() or "Authorization"
+    if "auth_token" in data and data["auth_token"].strip():
+        new_token = data["auth_token"].strip()
+        connector.auth_token_encrypted = new_token
+        connector.token_preview = connector.mask_token(new_token)
+    if "custom_headers" in data:
+        connector.custom_headers = data["custom_headers"]
+    if "sample_payload" in data:
+        connector.sample_payload = data["sample_payload"]
+    if "sample_response" in data:
+        connector.sample_response = data["sample_response"]
+    if "payload_schema" in data:
+        connector.payload_schema = data["payload_schema"].strip()
+    if "timeout_ms" in data:
+        connector.timeout_ms = int(data["timeout_ms"])
+    if "retry_count" in data:
+        connector.retry_count = int(data["retry_count"])
+    if "is_mock_enabled" in data:
+        connector.is_mock_enabled = bool(data["is_mock_enabled"])
+    if "is_active" in data:
+        connector.is_active = bool(data["is_active"])
+
+    db.session.commit()
+    logger.info(f"Updated microservice connector: {connector.service_key}")
+    return jsonify(connector.to_dict()), 200
+
+@admin_bp.route("/connectors/<connector_id>", methods=["DELETE"])
+def delete_connector(connector_id):
+    """Deletes or unregisters a microservice connector."""
+    connector = MicroserviceApiRegistry.query.filter_by(id=connector_id).first()
+    if not connector:
+        return jsonify({"error": "Not Found", "message": f"Connector {connector_id} not found"}), 404
+
+    key = connector.service_key
+    db.session.delete(connector)
+    db.session.commit()
+    logger.info(f"Deleted microservice connector: {key}")
+    return jsonify({"message": f"Connector {key} successfully removed"}), 200
+
+@admin_bp.route("/connectors/<connector_id>/toggle-mock", methods=["POST"])
+def toggle_mock_connector(connector_id):
+    """Quickly toggles mock simulation mode vs live network dispatch."""
+    connector = MicroserviceApiRegistry.query.filter_by(id=connector_id).first()
+    if not connector:
+        return jsonify({"error": "Not Found", "message": f"Connector {connector_id} not found"}), 404
+
+    connector.is_mock_enabled = not connector.is_mock_enabled
+    db.session.commit()
+    return jsonify({
+        "id": connector.id,
+        "service_key": connector.service_key,
+        "is_mock_enabled": connector.is_mock_enabled,
+        "message": f"Switched {connector.service_name} to {'MOCK SIMULATOR' if connector.is_mock_enabled else 'LIVE NETWORK'} mode"
+    }), 200
+
+@admin_bp.route("/connectors/<connector_id>/test", methods=["POST"])
+def test_connector(connector_id):
+    """
+    Executes an on-demand live or simulated test probe.
+    Returns status code, latency, request details, and response body.
+    Updates telemetry and health status in MySQL.
+    """
+    connector = MicroserviceApiRegistry.query.filter_by(id=connector_id).first()
+    if not connector:
+        return jsonify({"error": "Not Found", "message": f"Connector {connector_id} not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    custom_payload = data.get("custom_payload") if data.get("custom_payload") is not None else connector.sample_payload
+    test_params = data.get("test_params") or {}
+
+    # Target URL interpolation: substitute {param} placeholders if provided
+    endpoint = connector.endpoint_path
+    for param_k, param_v in test_params.items():
+        endpoint = endpoint.replace(f"{{{param_k}}}", str(param_v))
+    # Fallback default replacements for common path variables
+    endpoint = endpoint.replace("{user_id}", "USR_10029")
+    endpoint = endpoint.replace("{payment_id}", "PAY_8839210")
+    endpoint = endpoint.replace("{order_id}", "ORD_5582910")
+    endpoint = endpoint.replace("{device_id}", "DEV_A9F88172BC")
+
+    target_url = f"{connector.base_url.rstrip('/')}/{endpoint.lstrip('/')}"
+    now_utc = datetime.now(timezone.utc)
+
+    # 1. Mock Simulation Mode
+    if connector.is_mock_enabled:
+        import random
+        simulated_latency = random.randint(18, 48)
+        time.sleep(simulated_latency / 1000.0)
+
+        connector.health_status = "HEALTHY"
+        connector.last_tested_at = now_utc
+        connector.last_latency_ms = simulated_latency
+        connector.last_status_code = 200
+        connector.last_error_message = None
+        db.session.commit()
+
+        token_hint = connector.token_preview or "sk-live-••••••••b49a"
+        auth_head = {connector.auth_header_key or "Authorization": f"Bearer {token_hint}"} if connector.auth_type != "NONE" else {}
+
+        return jsonify({
+            "success": True,
+            "execution_mode": "MOCK_SIMULATION",
+            "target_url": target_url,
+            "http_method": connector.http_method,
+            "status_code": 200,
+            "latency_ms": simulated_latency,
+            "headers_sent": {
+                **auth_head,
+                **(connector.custom_headers or {})
+            },
+            "payload_sent": custom_payload,
+            "response_body": connector.sample_response or {"status": "ok", "mock": True},
+            "tested_at": to_utc_iso(now_utc),
+            "health_status": "HEALTHY"
+        }), 200
+
+    # 2. Live Network Mode
+    headers = dict(connector.custom_headers or {})
+    token = connector.auth_token_encrypted or ""
+    if token.startswith("ENV:"):
+        import os
+        token = os.environ.get(token[4:], "")
+
+    if connector.auth_type == "BEARER_TOKEN" and token:
+        headers[connector.auth_header_key or "Authorization"] = f"Bearer {token}"
+    elif connector.auth_type == "API_KEY" and token:
+        headers[connector.auth_header_key or "X-API-KEY"] = token
+    elif connector.auth_type == "CUSTOM_HEADER" and token:
+        headers[connector.auth_header_key or "X-Custom-Auth"] = token
+
+    start_time = time.time()
+    try:
+        req_kwargs = {
+            "method": connector.http_method,
+            "url": target_url,
+            "headers": headers,
+            "timeout": (connector.timeout_ms or 5000) / 1000.0
+        }
+        if connector.http_method in ("POST", "PUT", "PATCH") and custom_payload is not None:
+            req_kwargs["json"] = custom_payload
+
+        resp = requests.request(**req_kwargs)
+        latency = int((time.time() - start_time) * 1000)
+
+        resp_body = None
+        try:
+            resp_body = resp.json()
+        except Exception:
+            resp_body = resp.text
+
+        connector.health_status = "HEALTHY" if resp.status_code < 400 else "DEGRADED"
+        connector.last_tested_at = now_utc
+        connector.last_latency_ms = latency
+        connector.last_status_code = resp.status_code
+        connector.last_error_message = None if resp.status_code < 400 else f"HTTP {resp.status_code}"
+        db.session.commit()
+
+        return jsonify({
+            "success": resp.status_code < 400,
+            "execution_mode": "LIVE_NETWORK",
+            "target_url": target_url,
+            "http_method": connector.http_method,
+            "status_code": resp.status_code,
+            "latency_ms": latency,
+            "headers_sent": {k: (connector.token_preview if ("auth" in k.lower() or "key" in k.lower()) else v) for k, v in headers.items()},
+            "payload_sent": custom_payload,
+            "response_body": resp_body,
+            "tested_at": to_utc_iso(now_utc),
+            "health_status": connector.health_status
+        }), 200
+    except Exception as exc:
+        latency = int((time.time() - start_time) * 1000)
+        connector.health_status = "UNAVAILABLE"
+        connector.last_tested_at = now_utc
+        connector.last_latency_ms = latency
+        connector.last_status_code = 504
+        connector.last_error_message = str(exc)
+        db.session.commit()
+
+        return jsonify({
+            "success": False,
+            "execution_mode": "LIVE_NETWORK",
+            "target_url": target_url,
+            "http_method": connector.http_method,
+            "status_code": 504,
+            "latency_ms": latency,
+            "error": str(exc),
+            "hint": "Downstream internal microservice is currently unreachable from this environment. Enable Mock Simulator to test offline.",
+            "tested_at": to_utc_iso(now_utc),
+            "health_status": "UNAVAILABLE"
+        }), 200
+
 

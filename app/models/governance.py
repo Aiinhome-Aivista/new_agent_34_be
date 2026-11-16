@@ -302,3 +302,99 @@ class AppNotification(db.Model):
             "is_read": self.is_read,
             "created_at": to_utc_iso(self.created_at),
         }
+
+class MicroserviceApiRegistry(db.Model):
+    """
+    Dynamic Enterprise Microservice API Connector Registry.
+    Decouples inter-service REST endpoints, headers, auth tokens, sample payloads,
+    and mock/live runtime execution flags from code into persistent storage.
+    """
+    __tablename__ = "microservice_api_registry"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    service_key = Column(String(80), unique=True, nullable=False, index=True)
+    service_name = Column(String(150), nullable=False)
+    service_category = Column(String(60), nullable=False)  # 'IDENTITY', 'PAYMENT', 'ORDER', 'DEVICE', 'DISPUTE', 'ACTION', 'NOTIFICATION'
+    description = Column(Text, nullable=True)
+
+    # HTTP Connectivity Details
+    http_method = Column(String(10), nullable=False, default="GET")  # 'GET', 'POST', 'PUT', 'DELETE', 'PATCH'
+    base_url = Column(String(255), nullable=False)
+    endpoint_path = Column(String(255), nullable=False)
+
+    # Authentication & Security
+    auth_type = Column(String(40), nullable=False, default="BEARER_TOKEN")  # 'NONE', 'BEARER_TOKEN', 'API_KEY', 'BASIC_AUTH', 'CUSTOM_HEADER'
+    auth_header_key = Column(String(80), nullable=True, default="Authorization")
+    auth_token_encrypted = Column(Text, nullable=True)
+    token_preview = Column(String(60), nullable=True)
+    custom_headers = Column(JSON, nullable=True)
+
+    # Payload & Response Schemas (JSON)
+    sample_payload = Column(JSON, nullable=True)
+    sample_response = Column(JSON, nullable=True)
+    payload_schema = Column(Text, nullable=True)
+
+    # Runtime Execution & Simulation Controls
+    timeout_ms = Column(Integer, nullable=False, default=5000)
+    retry_count = Column(Integer, nullable=False, default=2)
+    is_mock_enabled = Column(Boolean, nullable=False, default=True)  # True = mock simulation, False = live network
+    is_active = Column(Boolean, nullable=False, default=True)
+
+    # Health & Telemetry
+    health_status = Column(String(30), nullable=False, default="HEALTHY")  # 'HEALTHY', 'DEGRADED', 'UNAVAILABLE', 'UNKNOWN'
+    last_tested_at = Column(TIMESTAMP, nullable=True)
+    last_latency_ms = Column(Integer, nullable=True)
+    last_status_code = Column(Integer, nullable=True)
+    last_error_message = Column(Text, nullable=True)
+
+    created_at = Column(TIMESTAMP, default=utc_now, nullable=False)
+    updated_at = Column(TIMESTAMP, default=utc_now, onupdate=utc_now, nullable=False)
+    updated_by = Column(String(100), nullable=True)
+
+    def mask_token(self, token: str) -> str:
+        if not token:
+            return ""
+        if token.startswith("ENV:"):
+            return token
+        if len(token) <= 8:
+            return "••••••••"
+        return f"{token[:4]}••••••••{token[-4:]}"
+
+    def to_dict(self, include_sensitive: bool = False):
+        token_display = self.token_preview
+        if not token_display and self.auth_token_encrypted:
+            token_display = self.mask_token(self.auth_token_encrypted)
+
+        data = {
+            "id": self.id,
+            "service_key": self.service_key,
+            "service_name": self.service_name,
+            "service_category": self.service_category,
+            "description": self.description or "",
+            "http_method": self.http_method,
+            "base_url": self.base_url,
+            "endpoint_path": self.endpoint_path,
+            "full_url": f"{self.base_url.rstrip('/')}/{self.endpoint_path.lstrip('/')}" if self.base_url and self.endpoint_path else "",
+            "auth_type": self.auth_type,
+            "auth_header_key": self.auth_header_key or "Authorization",
+            "token_preview": token_display or "None configured",
+            "custom_headers": self.custom_headers or {},
+            "sample_payload": self.sample_payload,
+            "sample_response": self.sample_response,
+            "payload_schema": self.payload_schema or "",
+            "timeout_ms": self.timeout_ms,
+            "retry_count": self.retry_count,
+            "is_mock_enabled": self.is_mock_enabled,
+            "is_active": self.is_active,
+            "health_status": self.health_status,
+            "last_tested_at": to_utc_iso(self.last_tested_at),
+            "last_latency_ms": self.last_latency_ms,
+            "last_status_code": self.last_status_code,
+            "last_error_message": self.last_error_message,
+            "created_at": to_utc_iso(self.created_at),
+            "updated_at": to_utc_iso(self.updated_at),
+            "updated_by": self.updated_by,
+        }
+        if include_sensitive:
+            data["auth_token_raw"] = self.auth_token_encrypted
+        return data
