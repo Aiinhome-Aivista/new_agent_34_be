@@ -827,6 +827,7 @@ def portal_submit_evidence():
             "request_token_id": req_token.id,
             "files_count": len(docs_for_audit),
             "documents": docs_for_audit,
+            "customer_statement": statement_payload,
             "evidence_ids": [e.id for e in saved_evidence_items],
             "statement_hash": statement_hash,
             "ip_address": request.remote_addr or "127.0.0.1",

@@ -169,7 +169,25 @@ def get_action_details(action_id):
         (AuditEvent.correlation_id.like(f"%{action.case_id}%"))
     ).order_by(AuditEvent.event_timestamp.asc()).all()
     
-    act_dict["audit_trail"] = [e.to_dict() for e in audit_events]
+    audit_trail = []
+    for e in audit_events:
+        item = e.to_dict()
+        if e.event_type == "EVIDENCE_SUBMITTED_BY_USER":
+            if not isinstance(item.get("details"), dict):
+                item["details"] = {}
+            if not item["details"].get("customer_statement"):
+                try:
+                    from app.models.investigation import CaseEvidence
+                    stmt_ev = CaseEvidence.query.filter_by(
+                        case_id=e.case_id,
+                        evidence_type="USER_TRANSACTION_STATEMENT"
+                    ).order_by(CaseEvidence.created_at.desc()).first()
+                    if stmt_ev and stmt_ev.normalized_payload:
+                        item["details"]["customer_statement"] = stmt_ev.normalized_payload
+                except Exception:
+                    pass
+        audit_trail.append(item)
+    act_dict["audit_trail"] = audit_trail
     
     return jsonify(act_dict), 200
 

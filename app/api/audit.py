@@ -48,6 +48,30 @@ def list_audit_events():
         item["is_current_case"] = is_current
         cid_short = f"#{e.case_id[:8]}" if e.case_id else ""
         item["case_label"] = "Current Case" if is_current else f"Previous Case {cid_short}".strip()
+
+        # Enrich customer statement for evidence submissions if missing in immutable details
+        if e.event_type == "EVIDENCE_SUBMITTED_BY_USER":
+            if not isinstance(item.get("details"), dict):
+                item["details"] = {}
+            if not item["details"].get("customer_statement"):
+                try:
+                    from app.models.investigation import CaseEvidence, EvidenceRequestToken
+                    stmt_ev = CaseEvidence.query.filter_by(
+                        case_id=e.case_id,
+                        evidence_type="USER_TRANSACTION_STATEMENT"
+                    ).order_by(CaseEvidence.created_at.desc()).first()
+                    if stmt_ev and stmt_ev.normalized_payload:
+                        item["details"]["customer_statement"] = stmt_ev.normalized_payload
+                    else:
+                        tok = EvidenceRequestToken.query.filter_by(
+                            case_id=e.case_id,
+                            status="SUBMITTED"
+                        ).order_by(EvidenceRequestToken.submitted_at.desc()).first()
+                        if tok and isinstance(tok.submission_payload, dict):
+                            item["details"]["customer_statement"] = tok.submission_payload
+                except Exception:
+                    pass
+
         if is_current:
             current_count += 1
         else:
