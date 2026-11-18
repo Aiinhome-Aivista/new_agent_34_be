@@ -1,16 +1,27 @@
+import os
+import re
 import json
 import time
 import logging
-import re
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Optional
-import httpx
+from typing import Dict, Any, List, Optional, Literal, Union
+
+from pydantic import BaseModel, Field, field_validator
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.output_parsers import PydanticOutputParser
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI, AzureChatOpenAI
+from langchain_anthropic import ChatAnthropic
+from langchain_ollama import ChatOllama
 
 from app.config import Config
 from app.schemas.recommendation import StructuredRecommendation, IndicatorItem
 
 logger = logging.getLogger("fraud_agent.llm_provider")
 
+
+# ── Robust JSON Extraction Helper ────────────────────────────────────────────
 
 def extract_json_from_response(raw_text: str) -> Optional[Dict[str, Any]]:
     """Robustly extracts JSON object from LLM response text."""
@@ -43,9 +54,72 @@ def extract_json_from_response(raw_text: str) -> Optional[Dict[str, Any]]:
 
     return None
 
+# Backwards compatibility alias
+extract_json_from_llm_response = extract_json_from_response
+
+
+# ── Pydantic Structured Output Models & Validation ───────────────────────────
+
+class IndicatorItemModel(BaseModel):
+    statement: str = Field(
+        description="Clear factual risk statement or mitigating signal grounded in evidence"
+    )
+    evidence_references: List[str] = Field(
+        default_factory=list,
+        description="List of evidence IDs cited from collected forensic evidence"
+    )
+
+
+VALID_ASSESSMENTS = Literal["SUSPICIOUS", "NOT_SUBSTANTIATED", "INCONCLUSIVE"]
+VALID_RECOMMENDATIONS = Literal[
+    "NO_ACTION", "MONITOR", "REQUEST_VERIFICATION", "SEND_NOTIFICATION",
+    "TEMPORARY_RESTRICTION", "HOLD_TRANSACTION", "BLOCK_TRANSACTION",
+    "BLOCK_USER", "BLOCK_MERCHANT", "ESCALATE", "UNLOCK_USER"
+]
+VALID_CONFIDENCES = Literal["HIGH", "MEDIUM", "LOW"]
+
+
+class LLMInvestigationOutput(BaseModel):
+    assessment: VALID_ASSESSMENTS = Field(
+        ...,
+        description="Forensic investigation assessment. Must be SUSPICIOUS, NOT_SUBSTANTIATED, or INCONCLUSIVE."
+    )
+    recommendation: VALID_RECOMMENDATIONS = Field(
+        ...,
+        description="Authorized mitigation action proposal. Must be one of the approved company actions."
+    )
+    explanation: str = Field(
+        ...,
+        min_length=20,
+        description="Detailed professional reasoning explaining findings, citing evidence and risk levels (minimum 25 words)."
+    )
+    confidence_label: VALID_CONFIDENCES = Field(
+        default="MEDIUM",
+        description="Confidence level in the assessment (HIGH, MEDIUM, LOW)."
+    )
+    risk_indicators: List[IndicatorItemModel] = Field(
+        default_factory=list,
+        description="List of factual risk indicators detected from evidence."
+    )
+    counter_signals: List[IndicatorItemModel] = Field(
+        default_factory=list,
+        description="List of mitigating factors or positive compliance signals."
+    )
+
+    @field_validator("explanation")
+    @classmethod
+    def validate_explanation_substantive(cls, v: str) -> str:
+        cleaned = v.strip()
+        words = cleaned.split()
+        if len(words) < 5:
+            raise ValueError("Explanation is too brief; must provide substantive forensic rationale.")
+        return cleaned
+
+
+# ── Base LLM Provider (LangChain Native) ─────────────────────────────────────
 
 class BaseLLMProvider(ABC):
-    """Abstract interface for LLM reasoning providers."""
+    """Abstract interface for LangChain-native LLM reasoning providers."""
 
     @property
     @abstractmethod
@@ -58,9 +132,75 @@ class BaseLLMProvider(ABC):
         pass
 
     @abstractmethod
-    def generate(self, prompt: str, system_prompt: Optional[str] = None, json_mode: bool = True) -> str:
-        """Generates text completion from the LLM."""
+    def get_chat_model(self) -> BaseChatModel:
+        """Returns the configured LangChain BaseChatModel instance."""
         pass
+
+    def generate(self, prompt: str, system_prompt: Optional[str] = None, json_mode: bool = True) -> str:
+        """Generates raw text completion from the LLM via LangChain BaseChatModel."""
+        model = self.get_chat_model()
+        messages: List[BaseMessage] = []
+        if system_prompt:
+            messages.append(SystemMessage(content=system_prompt))
+
+        user_content = prompt
+        if json_mode and "json" not in prompt.lower():
+            user_content = f"{prompt}\n\nIMPORTANT: Respond ONLY in valid JSON format."
+        messages.append(HumanMessage(content=user_content))
+
+        t0 = time.time()
+        logger.info(f"[{self.provider_name.upper()}] Invoking model {self.model_name}...")
+        resp = model.invoke(messages)
+        elapsed = round(time.time() - t0, 2)
+        logger.info(f"[{self.provider_name.upper()}] Completed in {elapsed}s")
+
+        content = resp.content
+        if isinstance(content, list):
+            return "".join([b.get("text", "") if isinstance(b, dict) else str(b) for b in content])
+        return str(content)
+
+    def generate_structured(self, prompt: str, system_prompt: Optional[str] = None) -> LLMInvestigationOutput:
+        """
+        Executes structured reasoning with strict Pydantic validation via LangChain.
+        Uses .with_structured_output(LLMInvestigationOutput) with parser fallback.
+        """
+        model = self.get_chat_model()
+        messages: List[BaseMessage] = []
+        if system_prompt:
+            messages.append(SystemMessage(content=system_prompt))
+        messages.append(HumanMessage(content=prompt))
+
+        # 1. Primary path: Native with_structured_output
+        try:
+            structured_llm = model.with_structured_output(LLMInvestigationOutput)
+            result = structured_llm.invoke(messages)
+            if isinstance(result, LLMInvestigationOutput):
+                return result
+            elif isinstance(result, dict):
+                return LLMInvestigationOutput.model_validate(result)
+        except Exception as e:
+            logger.warning(f"Native with_structured_output failed on {self.provider_name} ({e}). Retrying with Pydantic parser.")
+
+        # 2. Fallback path: PydanticOutputParser with augmented prompt
+        parser = PydanticOutputParser(pydantic_object=LLMInvestigationOutput)
+        format_instructions = parser.get_format_instructions()
+        augmented_prompt = f"{prompt}\n\n{format_instructions}"
+
+        aug_messages: List[BaseMessage] = []
+        if system_prompt:
+            aug_messages.append(SystemMessage(content=system_prompt))
+        aug_messages.append(HumanMessage(content=augmented_prompt))
+
+        raw_res = model.invoke(aug_messages)
+        raw_text = raw_res.content
+        if isinstance(raw_text, list):
+            raw_text = "".join([b.get("text", "") if isinstance(b, dict) else str(b) for b in raw_text])
+        raw_text = str(raw_text)
+
+        parsed_dict = extract_json_from_response(raw_text)
+        if parsed_dict:
+            return LLMInvestigationOutput.model_validate(parsed_dict)
+        return parser.parse(raw_text)
 
     @abstractmethod
     def check_health(self) -> Dict[str, Any]:
@@ -68,12 +208,14 @@ class BaseLLMProvider(ABC):
         pass
 
 
+# ── Concrete Providers ───────────────────────────────────────────────────────
+
 class GeminiProvider(BaseLLMProvider):
-    """Google Gemini LLM provider via Generative Language REST API."""
+    """Google Gemini LLM provider via LangChain ChatGoogleGenerativeAI."""
 
     def __init__(self):
         self.api_key = Config.GEMINI_API_KEY
-        self.model = Config.GEMINI_MODEL or "gemini-1.5-flash"
+        self.model = Config.GEMINI_MODEL or "gemini-3.1-flash-lite"
         self.timeout = float(Config.LLM_TIMEOUT or 60)
 
     @property
@@ -84,65 +226,89 @@ class GeminiProvider(BaseLLMProvider):
     def model_name(self) -> str:
         return self.model
 
-    def generate(self, prompt: str, system_prompt: Optional[str] = None, json_mode: bool = True) -> str:
+    def get_chat_model(self) -> BaseChatModel:
         if not self.api_key:
             raise ValueError("GEMINI_API_KEY is not configured in environment.")
-
-        # Google Gemini API endpoint
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
-
-        contents = []
-        if system_prompt:
-            contents.append({"role": "user", "parts": [{"text": f"SYSTEM INSTRUCTIONS:\n{system_prompt}"}]})
-            contents.append({"role": "model", "parts": [{"text": "Understood. I will strictly follow all system instructions and output format requirements."}]})
-
-        contents.append({"role": "user", "parts": [{"text": prompt}]})
-
-        generation_config = {
-            "temperature": 0.2,
-        }
-        if json_mode:
-            generation_config["responseMimeType"] = "application/json"
-
-        payload = {
-            "contents": contents,
-            "generationConfig": generation_config
-        }
-
-        t0 = time.time()
-        print(f"   🌐 [LLM-HTTP] >>> POST {url.split('?')[0]} (Model: {self.model})", flush=True)
-        with httpx.Client(timeout=self.timeout) as client:
-            resp = client.post(url, json=payload)
-            elapsed = round(time.time() - t0, 2)
-            print(f"   🌐 [LLM-HTTP] <<< HTTP {resp.status_code} received in {elapsed}s", flush=True)
-            resp.raise_for_status()
-            data = resp.json()
-
-            candidates = data.get("candidates", [])
-            if not candidates:
-                raise ValueError("Gemini returned empty candidate list.")
-
-            first_candidate = candidates[0]
-            parts = first_candidate.get("content", {}).get("parts", [])
-            if not parts:
-                raise ValueError("Gemini candidate contains no content parts.")
-
-            return parts[0].get("text", "")
+        return ChatGoogleGenerativeAI(
+            model=self.model,
+            google_api_key=self.api_key,
+            temperature=0.2,
+            timeout=self.timeout
+        )
 
     def check_health(self) -> Dict[str, Any]:
         if not self.api_key:
             return {"status": "NOT_CONFIGURED", "message": "GEMINI_API_KEY is missing"}
-        return {"status": "CONFIGURED", "model": self.model}
+        return {"status": "CONFIGURED", "provider": "gemini", "model": self.model}
+
+
+class MistralProvider(BaseLLMProvider):
+    """
+    Mistral LLM Provider via LangChain.
+    Supports either:
+    1. Local/On-prem Mistral via LangChain ChatOllama (e.g. mistral-small:24b or mistral:latest)
+    2. Mistral Cloud API via ChatMistralAI (if MISTRAL_API_KEY is set)
+    """
+
+    def __init__(self):
+        raw_url = Config.LLM_API_URL or "http://122.163.121.176:3041/api/generate"
+        clean_url = re.sub(r"/api/(?:generate|chat)/?$", "", raw_url.strip())
+        self.base_url = clean_url
+        self.model = Config.LLM_MODEL or "mistral-small:24b"
+        self.timeout = float(Config.LLM_TIMEOUT or 180)
+        self.mistral_api_key = getattr(Config, "MISTRAL_API_KEY", os.getenv("MISTRAL_API_KEY", ""))
+
+    @property
+    def provider_name(self) -> str:
+        return "mistral"
+
+    @property
+    def model_name(self) -> str:
+        return self.model
+
+    def get_chat_model(self) -> BaseChatModel:
+        if self.mistral_api_key:
+            try:
+                from langchain_mistralai import ChatMistralAI
+                return ChatMistralAI(
+                    model=self.model,
+                    api_key=self.mistral_api_key,
+                    temperature=0.2,
+                    timeout=self.timeout
+                )
+            except Exception as e:
+                logger.warning(f"Could not load ChatMistralAI ({e}). Falling back to ChatOllama.")
+
+        return ChatOllama(
+            base_url=self.base_url,
+            model=self.model,
+            temperature=0.2,
+            timeout=self.timeout
+        )
+
+    def check_health(self) -> Dict[str, Any]:
+        return {
+            "status": "CONFIGURED",
+            "provider": "mistral",
+            "model": self.model,
+            "endpoint": self.base_url
+        }
+
+
+class CustomLocalLLMProvider(MistralProvider):
+    """Backward-compatible alias for local / on-prem Mistral provider."""
+    @property
+    def provider_name(self) -> str:
+        return "custom"
 
 
 class OpenAIProvider(BaseLLMProvider):
-    """OpenAI ChatGPT / GPT-4o provider."""
+    """OpenAI ChatGPT / GPT-4o provider via LangChain ChatOpenAI."""
 
     def __init__(self):
         self.api_key = Config.OPENAI_API_KEY
         self.model = Config.OPENAI_MODEL or "gpt-4o-mini"
-        base_url = Config.OPENAI_BASE_URL.strip() if Config.OPENAI_BASE_URL else "https://api.openai.com/v1"
-        self.url = f"{base_url.rstrip('/')}/chat/completions"
+        self.base_url = Config.OPENAI_BASE_URL.strip() if Config.OPENAI_BASE_URL else None
         self.timeout = float(Config.LLM_TIMEOUT or 60)
 
     @property
@@ -153,47 +319,31 @@ class OpenAIProvider(BaseLLMProvider):
     def model_name(self) -> str:
         return self.model
 
-    def generate(self, prompt: str, system_prompt: Optional[str] = None, json_mode: bool = True) -> str:
+    def get_chat_model(self) -> BaseChatModel:
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY is not configured in environment.")
-
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
-
-        payload = {
+        kwargs: Dict[str, Any] = {
             "model": self.model,
-            "messages": messages,
-            "temperature": 0.2
+            "api_key": self.api_key,
+            "temperature": 0.2,
+            "timeout": self.timeout
         }
-        if json_mode:
-            payload["response_format"] = {"type": "json_object"}
-
-        with httpx.Client(timeout=self.timeout) as client:
-            resp = client.post(self.url, headers=headers, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            return data["choices"][0]["message"]["content"]
+        if self.base_url:
+            kwargs["base_url"] = self.base_url
+        return ChatOpenAI(**kwargs)
 
     def check_health(self) -> Dict[str, Any]:
         if not self.api_key:
             return {"status": "NOT_CONFIGURED", "message": "OPENAI_API_KEY is missing"}
-        return {"status": "CONFIGURED", "model": self.model}
+        return {"status": "CONFIGURED", "provider": "openai", "model": self.model}
 
 
 class ClaudeProvider(BaseLLMProvider):
-    """Anthropic Claude LLM provider."""
+    """Anthropic Claude LLM provider via LangChain ChatAnthropic."""
 
     def __init__(self):
         self.api_key = Config.ANTHROPIC_API_KEY
         self.model = Config.ANTHROPIC_MODEL or "claude-3-5-sonnet-20241022"
-        self.url = "https://api.anthropic.com/v1/messages"
         self.timeout = float(Config.LLM_TIMEOUT or 60)
 
     @property
@@ -204,51 +354,31 @@ class ClaudeProvider(BaseLLMProvider):
     def model_name(self) -> str:
         return self.model
 
-    def generate(self, prompt: str, system_prompt: Optional[str] = None, json_mode: bool = True) -> str:
+    def get_chat_model(self) -> BaseChatModel:
         if not self.api_key:
             raise ValueError("ANTHROPIC_API_KEY is not configured in environment.")
-
-        headers = {
-            "x-api-key": self.api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json"
-        }
-
-        user_content = prompt
-        if json_mode:
-            user_content = f"{prompt}\n\nIMPORTANT: Respond ONLY with valid JSON. Do not include markdown code block formatting or explanations outside JSON."
-
-        payload = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": user_content}],
-            "max_tokens": 4096,
-            "temperature": 0.2
-        }
-        if system_prompt:
-            payload["system"] = system_prompt
-
-        with httpx.Client(timeout=self.timeout) as client:
-            resp = client.post(self.url, headers=headers, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            return data["content"][0]["text"]
+        return ChatAnthropic(
+            model=self.model,
+            api_key=self.api_key,
+            temperature=0.2,
+            timeout=self.timeout
+        )
 
     def check_health(self) -> Dict[str, Any]:
         if not self.api_key:
             return {"status": "NOT_CONFIGURED", "message": "ANTHROPIC_API_KEY is missing"}
-        return {"status": "CONFIGURED", "model": self.model}
+        return {"status": "CONFIGURED", "provider": "claude", "model": self.model}
 
 
 class AzureOpenAIProvider(BaseLLMProvider):
-    """Azure OpenAI / Copilot provider."""
+    """Azure OpenAI provider via LangChain AzureChatOpenAI."""
 
     def __init__(self):
         self.api_key = Config.AZURE_OPENAI_API_KEY
-        endpoint = Config.AZURE_OPENAI_ENDPOINT.rstrip('/') if Config.AZURE_OPENAI_ENDPOINT else ""
-        deployment = Config.AZURE_OPENAI_DEPLOYMENT or "gpt-4o"
-        api_version = Config.AZURE_OPENAI_API_VERSION or "2024-02-01"
-        self.model = deployment
-        self.url = f"{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
+        self.endpoint = Config.AZURE_OPENAI_ENDPOINT.rstrip('/') if Config.AZURE_OPENAI_ENDPOINT else ""
+        self.deployment = Config.AZURE_OPENAI_DEPLOYMENT or "gpt-4o"
+        self.api_version = Config.AZURE_OPENAI_API_VERSION or "2024-02-01"
+        self.model = self.deployment
         self.timeout = float(Config.LLM_TIMEOUT or 60)
 
     @property
@@ -259,163 +389,63 @@ class AzureOpenAIProvider(BaseLLMProvider):
     def model_name(self) -> str:
         return self.model
 
-    def generate(self, prompt: str, system_prompt: Optional[str] = None, json_mode: bool = True) -> str:
-        if not self.api_key or not Config.AZURE_OPENAI_ENDPOINT:
+    def get_chat_model(self) -> BaseChatModel:
+        if not self.api_key or not self.endpoint:
             raise ValueError("AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT must be configured.")
-
-        headers = {
-            "api-key": self.api_key,
-            "Content-Type": "application/json"
-        }
-
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
-
-        payload = {
-            "messages": messages,
-            "temperature": 0.2
-        }
-        if json_mode:
-            payload["response_format"] = {"type": "json_object"}
-
-        with httpx.Client(timeout=self.timeout) as client:
-            resp = client.post(self.url, headers=headers, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            return data["choices"][0]["message"]["content"]
+        return AzureChatOpenAI(
+            azure_deployment=self.deployment,
+            api_version=self.api_version,
+            azure_endpoint=self.endpoint,
+            api_key=self.api_key,
+            temperature=0.2,
+            timeout=self.timeout
+        )
 
     def check_health(self) -> Dict[str, Any]:
-        if not self.api_key or not Config.AZURE_OPENAI_ENDPOINT:
+        if not self.api_key or not self.endpoint:
             return {"status": "NOT_CONFIGURED", "message": "Azure OpenAI credentials missing"}
-        return {"status": "CONFIGURED", "model": self.model}
+        return {"status": "CONFIGURED", "provider": "azure_openai", "model": self.model}
 
 
-class CustomLocalLLMProvider(BaseLLMProvider):
-    """
-    Local / Custom LLM Provider supporting:
-    - Ollama /generate endpoint (e.g. http://122.163.121.176:3041/api/generate)
-    - Ollama /chat endpoint
-    - vLLM / LocalAI / OpenAI-compatible local servers
-    """
-
-    def __init__(self):
-        self.api_url = Config.LLM_API_URL or "http://122.163.121.176:3041/api/generate"
-        self.model = Config.LLM_MODEL or "mistral-small:24b"
-        self.timeout = float(Config.LLM_TIMEOUT or 300)
-
-    @property
-    def provider_name(self) -> str:
-        return "custom"
-
-    @property
-    def model_name(self) -> str:
-        return self.model
-
-    def generate(self, prompt: str, system_prompt: Optional[str] = None, json_mode: bool = True) -> str:
-        if not self.api_url:
-            raise ValueError("LLM_API_URL is not configured.")
-
-        full_prompt = prompt
-        if system_prompt:
-            full_prompt = f"System Instruction:\n{system_prompt}\n\nTask:\n{prompt}"
-
-        # Detect endpoint format
-        is_ollama_generate = self.api_url.rstrip("/").endswith("/api/generate")
-        is_ollama_chat = self.api_url.rstrip("/").endswith("/api/chat")
-
-        with httpx.Client(timeout=self.timeout) as client:
-            if is_ollama_generate:
-                payload: Dict[str, Any] = {
-                    "model": self.model,
-                    "prompt": full_prompt,
-                    "stream": False,
-                    "options": {"temperature": 0.2}
-                }
-                if json_mode:
-                    payload["format"] = "json"
-
-                resp = client.post(self.api_url, json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-                return data.get("response", "")
-
-            elif is_ollama_chat:
-                messages = []
-                if system_prompt:
-                    messages.append({"role": "system", "content": system_prompt})
-                messages.append({"role": "user", "content": prompt})
-
-                payload = {
-                    "model": self.model,
-                    "messages": messages,
-                    "stream": False,
-                    "options": {"temperature": 0.2}
-                }
-                if json_mode:
-                    payload["format"] = "json"
-
-                resp = client.post(self.api_url, json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-                return data.get("message", {}).get("content", "")
-
-            else:
-                # Default to OpenAI-compatible chat completion payload
-                messages = []
-                if system_prompt:
-                    messages.append({"role": "system", "content": system_prompt})
-                messages.append({"role": "user", "content": prompt})
-
-                payload = {
-                    "model": self.model,
-                    "messages": messages,
-                    "temperature": 0.2
-                }
-                if json_mode:
-                    payload["response_format"] = {"type": "json_object"}
-
-                resp = client.post(self.api_url, json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-
-                if "choices" in data and len(data["choices"]) > 0:
-                    return data["choices"][0]["message"]["content"]
-                elif "response" in data:
-                    return data["response"]
-                else:
-                    return str(data)
-
-    def check_health(self) -> Dict[str, Any]:
-        if not self.api_url:
-            return {"status": "NOT_CONFIGURED", "message": "LLM_API_URL missing"}
-        return {"status": "CONFIGURED", "model": self.model, "endpoint": self.api_url}
-
+# ── Provider Factory ─────────────────────────────────────────────────────────
 
 class LLMProviderFactory:
-    """Factory to instantiate and manage LLM reasoning providers."""
+    """Factory to instantiate and manage LangChain LLM reasoning providers."""
 
     @staticmethod
     def get_provider(provider_type: Optional[str] = None) -> BaseLLMProvider:
-        active = (provider_type or Config.LLM_PROVIDER or "custom").lower().strip()
+        active = (provider_type or Config.LLM_PROVIDER or "gemini").lower().strip()
 
         if active == "gemini":
             return GeminiProvider()
+        elif active in ["mistral", "custom", "ollama", "local"]:
+            return MistralProvider()
         elif active == "openai":
             return OpenAIProvider()
         elif active == "claude":
             return ClaudeProvider()
         elif active == "azure_openai":
             return AzureOpenAIProvider()
-        elif active in ["custom", "mistral", "ollama", "local"]:
-            return CustomLocalLLMProvider()
         else:
-            raise ValueError(f"Unknown or unsupported LLM provider '{active}'. Please configure a valid provider in .env.")
+            logger.warning(f"Unknown provider '{active}', defaulting to GeminiProvider.")
+            return GeminiProvider()
 
+    @staticmethod
+    def get_fallback_provider() -> BaseLLMProvider:
+        """Returns the mandatory secondary fallback LLM: Mistral."""
+        return MistralProvider()
+
+
+# ── LLM Reasoning Service ────────────────────────────────────────────────────
 
 class LLMReasoningService:
-    """High-level service orchestrating structured investigation reasoning."""
+    """
+    High-level service orchestrating structured investigation reasoning via LangChain.
+    Policy:
+      - Primary LLM: Gemini
+      - Fallback LLM: Mistral
+      - Zero mock fallbacks: If both real LLMs fail, raises an explicit exception.
+    """
 
     SYSTEM_PROMPT = """You are Agent 34, an autonomous forensic fraud investigator for e-commerce, banking, and payment operations.
 Your job is to analyze forensic evidence (user profile, transaction details, payments, dispute/chargeback history, and multi-hop graph networks) alongside relevant company policies.
@@ -423,27 +453,8 @@ Your job is to analyze forensic evidence (user profile, transaction details, pay
 CRITICAL REQUIREMENTS:
 1. Ground every risk indicator and counter signal strictly in the provided evidence. Cite valid evidence IDs.
 2. Never hallucinate facts or missing data.
-3. You must output ONLY a valid JSON object matching the exact specification below. Do not wrap in markdown or add conversational preamble.
-
-Required JSON Structure:
-{
-  "assessment": "SUSPICIOUS" | "NOT_SUBSTANTIATED" | "INCONCLUSIVE",
-  "recommendation": "NO_ACTION" | "MONITOR" | "REQUEST_VERIFICATION" | "SEND_NOTIFICATION" | "TEMPORARY_RESTRICTION" | "HOLD_TRANSACTION" | "BLOCK_TRANSACTION" | "BLOCK_USER" | "BLOCK_MERCHANT" | "ESCALATE",
-  "explanation": "Detailed professional reasoning explaining findings, citing evidence and risk levels (minimum 25 words).",
-  "confidence_label": "HIGH" | "MEDIUM" | "LOW",
-  "risk_indicators": [
-    {
-      "statement": "Clear factual risk statement",
-      "evidence_references": ["evidence_id_1"]
-    }
-  ],
-  "counter_signals": [
-    {
-      "statement": "Factual mitigating statement e.g. KYC verified, longstanding account",
-      "evidence_references": ["evidence_id_2"]
-    }
-  ]
-}"""
+3. You must output structured forensic findings matching the schema: assessment, recommendation, explanation, confidence_label, risk_indicators, counter_signals.
+"""
 
     @classmethod
     def generate_investigation_reasoning(
@@ -456,16 +467,17 @@ Required JSON Structure:
         graph_analysis: Dict[str, Any],
         retrieved_policies: List[Dict[str, Any]],
         missing_evidence: List[str],
-        # Phase 3: Knowledgebase intelligence grounding inputs
         rule_evaluation_results: Dict[str, Any] = None,
         historical_patterns: List[Dict[str, Any]] = None,
         evidence_lifecycle: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """
-        Executes LLM reasoning across configured provider with guaranteed fallback.
+        Executes LangChain structured reasoning across primary LLM (Gemini)
+        with automatic failover strictly to secondary LLM (Mistral).
+        Zero mock fallbacks allowed as per system policy.
         """
-        provider = LLMProviderFactory.get_provider()
-        model_tag = f"{provider.provider_name}/{provider.model_name}"
+        primary_provider = LLMProviderFactory.get_provider()
+        fallback_provider = LLMProviderFactory.get_fallback_provider()
 
         prompt = cls._build_investigation_prompt(
             case_id=case_id,
@@ -481,102 +493,112 @@ Required JSON Structure:
             evidence_lifecycle=evidence_lifecycle,
         )
 
-        # Prominent Terminal Logging for Investigation Reasoning
         dispatch_start = time.time()
         rule_res = rule_evaluation_results or {}
         trig_rules = [r.get("rule_id") for r in rule_res.get("triggered_rules", [])]
 
         print("\n" + "=" * 80, flush=True)
-        print(f"🤖 [LLM INVESTIGATION DISPATCH] Case: {case_id}", flush=True)
-        print(f"   Provider:      {provider.provider_name.upper()} | Model: {provider.model_name}", flush=True)
+        print(f"🤖 [LANGCHAIN INVESTIGATION DISPATCH] Case: {case_id}", flush=True)
+        print(f"   Primary LLM:   {primary_provider.provider_name.upper()} ({primary_provider.model_name})", flush=True)
+        print(f"   Fallback LLM:  {fallback_provider.provider_name.upper()} ({fallback_provider.model_name})", flush=True)
         print(f"   Trigger Type:  {trigger_type} (Priority: {priority})", flush=True)
         print(f"   Trigger Note:  {trigger_reason[:75]}...", flush=True)
         print(f"   Grounding:     Evidence Items: {len(evidence_items)} | Active Policies: {len(retrieved_policies)} | Triggered Rules: {trig_rules or 'None'}", flush=True)
         print("-" * 80, flush=True)
 
-        max_attempts = 3
-        last_error = None
+        # ── 1. Attempt Primary LLM (Gemini) ──────────────────────────────────
+        primary_error = None
+        max_attempts = 2
         for attempt in range(1, max_attempts + 1):
             try:
-                print(f"▶️  [Attempt {attempt}/{max_attempts}] Querying LLM Engine...", flush=True)
-                raw_response = provider.generate(prompt=prompt, system_prompt=cls.SYSTEM_PROMPT, json_mode=True)
-                parsed_json = extract_json_from_response(raw_response)
+                print(f"▶️  [Attempt {attempt}/{max_attempts}] Querying Primary LLM [{primary_provider.provider_name.upper()}] via LangChain structured output...", flush=True)
+                output: LLMInvestigationOutput = primary_provider.generate_structured(
+                    prompt=prompt,
+                    system_prompt=cls.SYSTEM_PROMPT
+                )
 
-                if parsed_json and "assessment" in parsed_json and "recommendation" in parsed_json:
-                    rec = parsed_json.get("recommendation", "MONITOR")
-                    valid_recs = {
-                        "NO_ACTION", "MONITOR", "REQUEST_VERIFICATION", "SEND_NOTIFICATION",
-                        "TEMPORARY_RESTRICTION", "HOLD_TRANSACTION", "BLOCK_TRANSACTION",
-                        "BLOCK_USER", "BLOCK_MERCHANT", "ESCALATE"
-                    }
-                    if rec not in valid_recs:
-                        rec = "REQUEST_VERIFICATION" if parsed_json.get("assessment") == "INCONCLUSIVE" else "MONITOR"
+                model_tag = f"{primary_provider.provider_name}/{primary_provider.model_name}"
+                total_elapsed = round(time.time() - dispatch_start, 2)
+                print("-" * 80, flush=True)
+                print(f"✅ [LANGCHAIN SYNTHESIS SUCCESS] Completed in {total_elapsed}s by {model_tag}", flush=True)
+                print(f"   Assessment:          {output.assessment}", flush=True)
+                print(f"   Action Proposal:     {output.recommendation}", flush=True)
+                print(f"   Confidence Level:    {output.confidence_label}", flush=True)
+                print(f"   Risk Indicators:     {len(output.risk_indicators)} detected", flush=True)
+                print(f"   Forensic Summary:    {output.explanation[:120]}...", flush=True)
+                print("=" * 80 + "\n", flush=True)
 
-                    assessment = parsed_json.get("assessment", "INCONCLUSIVE")
-                    if assessment not in {"SUSPICIOUS", "NOT_SUBSTANTIATED", "INCONCLUSIVE"}:
-                        assessment = "INCONCLUSIVE"
-
-                    confidence = parsed_json.get("confidence_label", "MEDIUM")
-                    if confidence not in {"HIGH", "MEDIUM", "LOW"}:
-                        confidence = "MEDIUM"
-
-                    explanation = parsed_json.get("explanation", "").strip()
-                    if len(explanation) < 20:
-                        explanation = f"Automated analysis completed by {model_tag}: Evidence synthesized for {trigger_type} with confidence {confidence}."
-
-                    risk_indicators = parsed_json.get("risk_indicators", [])
-                    counter_signals = parsed_json.get("counter_signals", [])
-
-                    total_elapsed = round(time.time() - dispatch_start, 2)
-                    print("-" * 80, flush=True)
-                    print(f"✅ [LLM SYNTHESIS SUCCESS] Completed in {total_elapsed}s by {model_tag}", flush=True)
-                    print(f"   Assessment:          {assessment}", flush=True)
-                    print(f"   Action Proposal:     {rec}", flush=True)
-                    print(f"   Confidence Level:    {confidence}", flush=True)
-                    print(f"   Risk Indicators:     {len(risk_indicators)} detected", flush=True)
-                    print(f"   Forensic Summary:    {explanation[:120]}...", flush=True)
-                    print("=" * 80 + "\n", flush=True)
-
-                    logger.info(f"LLM reasoning successfully synthesized by {model_tag} with assessment: {assessment}, recommendation: {rec}")
-                    return {
-                        "assessment": assessment,
-                        "recommendation": rec,
-                        "explanation": explanation,
-                        "confidence_label": confidence,
-                        "risk_indicators": risk_indicators,
-                        "counter_signals": counter_signals,
-                        "model_name": model_tag
-                    }
-                else:
-                    print(f"⚠️  [Attempt {attempt}] Response missing required schema fields. Retrying...", flush=True)
-                    logger.warning(f"LLM response attempt {attempt} missing schema fields. Retrying...")
-                    last_error = ValueError("Missing schema fields in response")
+                logger.info(f"LLM reasoning successfully synthesized by {model_tag}: {output.assessment} -> {output.recommendation}")
+                return {
+                    "assessment": output.assessment,
+                    "recommendation": output.recommendation,
+                    "explanation": output.explanation,
+                    "confidence_label": output.confidence_label,
+                    "risk_indicators": [item.model_dump() for item in output.risk_indicators],
+                    "counter_signals": [item.model_dump() for item in output.counter_signals],
+                    "model_name": model_tag
+                }
             except Exception as e:
-                last_error = e
-                print(f"⚠️  [Attempt {attempt} Error] {e}", flush=True)
-                logger.warning(f"LLM attempt {attempt} failed ({provider.provider_name}): {e}")
+                primary_error = e
+                print(f"⚠️  [Primary Attempt {attempt} Error] {e}", flush=True)
+                logger.warning(f"Primary LLM attempt {attempt} failed: {e}")
                 if attempt < max_attempts:
-                    retry_wait = round(1.5 * attempt, 1)
-                    print(f"⏳ Waiting {retry_wait}s before retry...", flush=True)
-                    time.sleep(retry_wait)
+                    time.sleep(1.0)
 
-        # Fallback to grounded deterministic rule engine reasoning if external LLM is offline/exhausted
+        # ── 2. Failover to Fallback LLM (Mistral) ────────────────────────────
         print("-" * 80, flush=True)
-        print(f"🛡️  [LLM FALLBACK ENGAGED] External LLM exhausted ({last_error})", flush=True)
-        print("   Activating Deterministic Fraud Rule Engine & Entity Graph Synthesis...", flush=True)
+        print(f"🔄 [LLM FAILOVER ACTIVATED] Primary LLM ({primary_provider.provider_name}) unavailable: {primary_error}", flush=True)
+        print(f"   Switching to fallback LLM: MISTRAL ({fallback_provider.model_name}) via LangChain...", flush=True)
+        print("-" * 80, flush=True)
+        logger.warning(f"Primary LLM exhausted. Engaging fallback Mistral LLM: {primary_error}")
+
+        fallback_error = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                print(f"▶️  [Fallback Attempt {attempt}/{max_attempts}] Querying Mistral LLM via LangChain structured output...", flush=True)
+                output: LLMInvestigationOutput = fallback_provider.generate_structured(
+                    prompt=prompt,
+                    system_prompt=cls.SYSTEM_PROMPT
+                )
+
+                model_tag = f"mistral/{fallback_provider.model_name} (Fallback)"
+                total_elapsed = round(time.time() - dispatch_start, 2)
+                print("-" * 80, flush=True)
+                print(f"✅ [FALLBACK MISTRAL SYNTHESIS SUCCESS] Completed in {total_elapsed}s by {model_tag}", flush=True)
+                print(f"   Assessment:          {output.assessment}", flush=True)
+                print(f"   Action Proposal:     {output.recommendation}", flush=True)
+                print(f"   Confidence Level:    {output.confidence_label}", flush=True)
+                print(f"   Risk Indicators:     {len(output.risk_indicators)} detected", flush=True)
+                print(f"   Forensic Summary:    {output.explanation[:120]}...", flush=True)
+                print("=" * 80 + "\n", flush=True)
+
+                logger.info(f"Fallback Mistral reasoning successfully synthesized by {model_tag}: {output.assessment} -> {output.recommendation}")
+                return {
+                    "assessment": output.assessment,
+                    "recommendation": output.recommendation,
+                    "explanation": output.explanation,
+                    "confidence_label": output.confidence_label,
+                    "risk_indicators": [item.model_dump() for item in output.risk_indicators],
+                    "counter_signals": [item.model_dump() for item in output.counter_signals],
+                    "model_name": model_tag
+                }
+            except Exception as e:
+                fallback_error = e
+                print(f"⚠️  [Fallback Mistral Attempt {attempt} Error] {e}", flush=True)
+                logger.warning(f"Fallback Mistral attempt {attempt} failed: {e}")
+                if attempt < max_attempts:
+                    time.sleep(1.0)
+
+        # ── 3. Strict Zero-Mock Policy ───────────────────────────────────────
+        print("-" * 80, flush=True)
+        print(f"❌ [ALL REAL LLMs FAILED] Both Primary ({primary_provider.provider_name}) and Fallback ({fallback_provider.provider_name}) failed.", flush=True)
+        print("   Zero mock data permitted under user specification.", flush=True)
         print("=" * 80 + "\n", flush=True)
-        logger.warning(f"LLM exhausted all {max_attempts} attempts ({last_error}). Falling back to deterministic rule engine reasoning.")
-        return cls._fallback_deterministic_reasoning(
-            case_id=case_id,
-            trigger_type=trigger_type,
-            trigger_reason=trigger_reason,
-            priority=priority,
-            evidence_items=evidence_items,
-            graph_analysis=graph_analysis,
-            retrieved_policies=retrieved_policies,
-            rule_evaluation_results=rule_evaluation_results,
-            historical_patterns=historical_patterns,
-            evidence_lifecycle=evidence_lifecycle,
+
+        raise RuntimeError(
+            f"All real LLM providers failed and no mock fallbacks are permitted. "
+            f"Primary ({primary_provider.provider_name}) error: {primary_error}. "
+            f"Fallback ({fallback_provider.provider_name}) error: {fallback_error}."
         )
 
     @classmethod
@@ -594,8 +616,7 @@ Required JSON Structure:
         evidence_lifecycle: dict = None,
     ) -> dict:
         """
-        Grounded deterministic fallback synthesis when external LLM provider is unavailable (503 / timeout).
-        Uses RuleEngine triggered rules, severity, and evidence directly to ensure zero pipeline stall.
+        Deterministic rule-based synthesizer preserved for offline unit testing.
         """
         rule_results = rule_evaluation_results or {}
         triggered = rule_results.get("triggered_rules", [])
@@ -616,7 +637,6 @@ Required JSON Structure:
                 "evidence_references": []
             })
 
-        # Check if user profile is already BLOCKED or SUSPENDED
         is_user_blocked_in_db = False
         target_user_status = None
         for item in (evidence_items or []):
@@ -674,7 +694,7 @@ Required JSON Structure:
             confidence = "LOW"
 
         explanation = (
-            f"Deterministic Forensic Synthesis (LLM Fallback): Case evaluated against structured fraud knowledgebase. "
+            f"Deterministic Forensic Synthesis: Case evaluated against structured fraud knowledgebase. "
             f"Rule Engine identified {len(triggered)} triggered rule(s) with total risk score of {total_score:.2f} "
             f"and highest severity '{highest_severity}'. Trigger reason: '{trigger_reason}'. "
             f"Grounding evidence references: {len(evidence_items)} item(s) collected."
@@ -687,7 +707,7 @@ Required JSON Structure:
             "confidence_label": confidence,
             "risk_indicators": risk_indicators,
             "counter_signals": [],
-            "model_name": "Deterministic-RuleEngine-Fallback"
+            "model_name": "Deterministic-RuleEngine"
         }
 
     @classmethod
@@ -701,7 +721,6 @@ Required JSON Structure:
         graph_analysis: Dict[str, Any],
         retrieved_policies: List[Dict[str, Any]],
         missing_evidence: List[str],
-        # Phase 3 grounding inputs
         rule_evaluation_results: Dict[str, Any] = None,
         historical_patterns: List[Dict[str, Any]] = None,
         evidence_lifecycle: Dict[str, Any] = None,
@@ -756,13 +775,10 @@ Required JSON Structure:
             prompt_sections.append("- Output assessment as 'SUSPICIOUS' and recommendation as 'BLOCK_USER' or 'ESCALATE' to prevent unauthorized processing for non-existent users.")
 
         prompt_sections.append("")
-        # --- Phase 3: Deterministic Rule Engine Results ---
         if rule_evaluation_results:
             triggered = rule_evaluation_results.get("triggered_rules", [])
-            passed = rule_evaluation_results.get("passed_rules", [])
             score = rule_evaluation_results.get("total_risk_score", 0.0)
             severity = rule_evaluation_results.get("highest_severity", "NONE")
-            prompt_sections.append("")
             prompt_sections.append("DETERMINISTIC RULE ENGINE RESULTS (pre-computed, authoritative):")
             prompt_sections.append(f"- Composite Risk Score: {score:.2f} / 1.00")
             prompt_sections.append(f"- Highest Triggered Severity: {severity}")
@@ -776,7 +792,7 @@ Required JSON Structure:
             else:
                 prompt_sections.append("- No fraud rules triggered (all rules passed).")
             prompt_sections.append("IMPORTANT: You MUST NOT perform any arithmetic. Accept these rule results as ground truth.")
-        # --- Phase 3: Historical Intelligence ---
+
         if historical_patterns:
             prompt_sections.append("")
             prompt_sections.append("HISTORICAL CASE PRECEDENTS (confirmed past outcomes):")
@@ -805,7 +821,6 @@ Required JSON Structure:
             prompt_sections.append("- Your assessment MUST be 'SUSPICIOUS' and recommendation MUST be 'BLOCK_USER' (Maintain Hard Block) or 'ESCALATE'.")
             prompt_sections.append("- You MUST explicitly cite in your explanation that the user is currently locked/blocked in the master database.")
 
-        # Check for Device-Level Ban Evasion (Hardware Taint from Graph Analysis)
         device_ban_evasion = (
             (graph_analysis or {}).get("device_ban_evasion_detected") or
             any(d.get("is_tainted_device") for d in (graph_analysis or {}).get("shared_devices", []))
@@ -821,10 +836,9 @@ Required JSON Structure:
                     f"- The hardware device '{dev_id}' used in this transaction was previously used by confirmed BLOCKED fraudster(s): {', '.join(blocked_accs)}."
                 )
             prompt_sections.append("- This indicates an active BAN EVASION attempt (a blocked fraudster creating or operating an alternate account from the same physical hardware).")
-            prompt_sections.append("- Your assessment MUST be 'CONFIRMED_FRAUD' or 'SUSPICIOUS' and recommendation MUST be 'BLOCK_USER'.")
+            prompt_sections.append("- Your assessment MUST be 'SUSPICIOUS' and recommendation MUST be 'BLOCK_USER'.")
             prompt_sections.append("- You MUST explicitly cite the tainted device ID and the name/ID of the linked blocked fraudster in your explanation.")
 
-        # Check evidence & verification lifecycle
         if evidence_lifecycle:
             tok_status = evidence_lifecycle.get("token_status") or evidence_lifecycle.get("status")
             req_docs = evidence_lifecycle.get("requested_documents", [])
@@ -845,102 +859,5 @@ Required JSON Structure:
                 prompt_sections.append(f"- Requested Types: {', '.join(req_docs) if req_docs else 'Govt ID / Proof of Address'}")
                 prompt_sections.append("- INSTRUCTION: Because mandatory evidence is still pending, you MUST recommend 'TEMPORARY_RESTRICTION' or 'HOLD_TRANSACTION'. Do NOT recommend account unlock or transaction clearance until evidence is uploaded.")
 
-        prompt_sections.append("Synthesize the case and output your structured decision JSON now:")
+        prompt_sections.append("Synthesize the case and output your structured decision now:")
         return "\n".join(prompt_sections)
-
-    @classmethod
-    def _deterministic_grounded_fallback(
-        cls,
-        evidence_items: List[Dict[str, Any]],
-        graph_analysis: Dict[str, Any],
-        missing_evidence: List[str],
-        model_tag: str
-    ) -> Dict[str, Any]:
-        """Provides guaranteed rule-based evidence synthesis if LLM provider is offline."""
-        risk_indicators = []
-        counter_signals = []
-        has_chargebacks = False
-        has_high_network_risk = graph_analysis.get("network_risk_indicator") == "HIGH"
-
-        for ev in evidence_items:
-            ev_id = ev.get("id")
-            ev_type = ev.get("evidence_type")
-            payload = ev.get("normalized_payload") or {}
-
-            if ev_type == "CHARGEBACK_HISTORY":
-                dispute_count = payload.get("count", 0)
-                if dispute_count > 0:
-                    has_chargebacks = True
-                    risk_indicators.append({
-                        "statement": f"Dispute history identified: {dispute_count} recorded chargeback dispute(s).",
-                        "evidence_references": [ev_id]
-                    })
-
-            if ev_type == "USER_PROFILE":
-                kyc = payload.get("kyc_status")
-                risk_level = payload.get("risk_level")
-                if kyc == "VERIFIED":
-                    counter_signals.append({
-                        "statement": "Customer identity is fully verified with VERIFIED KYC status.",
-                        "evidence_references": [ev_id]
-                    })
-                if risk_level == "HIGH":
-                    risk_indicators.append({
-                        "statement": "Upstream source system flagged customer profile risk level as HIGH.",
-                        "evidence_references": [ev_id]
-                    })
-
-        if has_high_network_risk:
-            shared_dev = graph_analysis.get("shared_devices_count", 0)
-            risk_indicators.append({
-                "statement": f"Entity graph traversal detected multiple users sharing {shared_dev} common hardware device(s).",
-                "evidence_references": []
-            })
-
-        is_user_unregistered = any(
-            item.get("evidence_type") == "USER_PROFILE" and item.get("retrieval_status") == "MISSING"
-            for item in evidence_items
-        ) or any("USER_PROFILE" in str(m) for m in missing_evidence)
-
-        if is_user_unregistered:
-            return {
-                "assessment": "SUSPICIOUS",
-                "recommendation": "BLOCK_USER",
-                "explanation": "Target user details do not exist in the m_users core database. Unregistered identity with no verified customer profile or account history.",
-                "confidence_label": "HIGH",
-                "risk_indicators": [{
-                    "statement": "Customer identity record was not located in master m_users database.",
-                    "evidence_references": [ev.get("id") for ev in evidence_items if ev.get("evidence_type") == "USER_PROFILE"]
-                }],
-                "counter_signals": [],
-                "model_name": model_tag
-            }
-
-        if has_chargebacks or has_high_network_risk:
-            assessment = "SUSPICIOUS"
-            recommendation = "HOLD_TRANSACTION"
-            confidence = "HIGH"
-            explanation = (
-                f"Substantiated risk indicators detected across {len(risk_indicators)} material evidence sources. "
-                f"Evidence indicates dispute anomalies or shared device clusters. Advising protective hold pending analyst review."
-            )
-        elif len(missing_evidence) > 0 and len(evidence_items) <= len(missing_evidence):
-            assessment = "INCONCLUSIVE"
-            recommendation = "REQUEST_VERIFICATION"
-            confidence = "LOW"
-            explanation = f"Insufficient source evidence retrieved. Critical records are missing: {', '.join(missing_evidence)}."
-        else:
-            assessment = "NOT_SUBSTANTIATED"
-            recommendation = "MONITOR"
-            confidence = "MEDIUM"
-            explanation = "Retrieved evidence does not substantiate anomalous merchant or user fraud. Continued monitoring advised."
-
-        return {
-            "assessment": assessment,
-            "recommendation": recommendation,
-            "explanation": explanation,
-            "confidence_label": confidence,
-            "risk_indicators": risk_indicators,
-            "counter_signals": counter_signals,
-            "model_name": model_tag
-        }
