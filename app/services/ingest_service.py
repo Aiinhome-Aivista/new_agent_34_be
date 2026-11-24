@@ -284,14 +284,21 @@ class IngestService:
                     }
                     continue
 
-                # 2. Existing User: Fetch linked data from m_orders, m_payments, m_chargebacks
-                linked_orders = MOrder.query.filter_by(user_id=user.user_id).order_by(MOrder.created_at.desc()).all()
-                linked_payments = MPayment.query.filter_by(user_id=user.user_id).order_by(MPayment.initiated_at.desc()).all()
+                # 2. Existing User: Fetch linked data dynamically from active microservices
+                from app.services.microservice_dispatcher import MicroserviceDispatcher
+
+                linked_orders = []
+                if MicroserviceDispatcher.is_service_active("ORDER_SERVICE"):
+                    linked_orders = MOrder.query.filter_by(user_id=user.user_id).order_by(MOrder.created_at.desc()).all()
+
+                linked_payments = []
+                if MicroserviceDispatcher.is_service_active("PAYMENT_SERVICE"):
+                    linked_payments = MPayment.query.filter_by(user_id=user.user_id).order_by(MPayment.initiated_at.desc()).all()
+
                 payment_ids = [p.payment_id for p in linked_payments]
-                linked_chargebacks = (
-                    MChargeback.query.filter(MChargeback.payment_id.in_(payment_ids)).all()
-                    if payment_ids else []
-                )
+                linked_chargebacks = []
+                if MicroserviceDispatcher.is_service_active("CHARGEBACK_SERVICE") and payment_ids:
+                    linked_chargebacks = MChargeback.query.filter(MChargeback.payment_id.in_(payment_ids)).all()
 
                 orders_count = len(linked_orders)
                 payments_count = len(linked_payments)
@@ -300,7 +307,7 @@ class IngestService:
                 target_merch_id = linked_payments[0].merchant_id if linked_payments else None
                 ingested_count += 1
 
-                # 3. Compute Dynamic Priority based on master domain state & policy signals
+                # 3. Compute Dynamic Priority based on active master domain state & policy signals
                 is_currently_blocked = (user.status == "BLOCKED")
                 is_high_risk = (
                     is_currently_blocked or
@@ -312,16 +319,32 @@ class IngestService:
                 )
                 priority = "CRITICAL" if is_currently_blocked else ("HIGH" if is_high_risk else "MEDIUM")
 
-                # 4. Enrich Trigger Reason with Master Tables Evidence Context & Lock Persistence
+                # 4. Enrich Trigger Reason with Active Microservices Context
                 base_reason = raw_reason.strip() if raw_reason else "Batch Ingestion User Audit"
                 if is_currently_blocked:
                     base_reason = f"[REPEAT OFFENDER ALERT] Target user is CURRENTLY BLOCKED due to previous enforcement. | {base_reason}"
+
+                profile_elements = []
+                if MicroserviceDispatcher.is_service_active("ORDER_SERVICE"):
+                    profile_elements.append(f"{orders_count} orders")
+                else:
+                    profile_elements.append("[orders: bypassed]")
+
+                if MicroserviceDispatcher.is_service_active("PAYMENT_SERVICE"):
+                    profile_elements.append(f"{payments_count} payments")
+                else:
+                    profile_elements.append("[payments: bypassed]")
+
+                if MicroserviceDispatcher.is_service_active("CHARGEBACK_SERVICE"):
+                    profile_elements.append(f"{chargebacks_count} disputes")
+                else:
+                    profile_elements.append("[disputes: bypassed]")
 
                 user_display = f"{user.first_name or ''} {user.last_name or ''}".strip() or user.user_id
                 enriched_reason = (
                     f"{base_reason} | Target: {user.user_id} ({user_display}) | Status: {user.status} | "
                     f"KYC: {user.kyc_status} | Risk Level: {user.risk_level} (Score: {user.risk_score or 0}) | "
-                    f"Domain Profile: {orders_count} orders, {payments_count} payments, {chargebacks_count} disputes"
+                    f"Domain Profile: {', '.join(profile_elements)}"
                 )[:495]
 
                 # Pipeline A: Incrementally populate Entity Graph Store for user, orders, and payments

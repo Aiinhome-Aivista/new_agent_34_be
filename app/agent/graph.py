@@ -94,8 +94,8 @@ def node_collect_evidence(state: InvestigationState) -> Dict[str, Any]:
             missing.append(f"{item.evidence_type} ({item.source_reference})")
         # Extract user profile for rule engine
         if item.evidence_type == "USER_PROFILE":
-            if item.retrieval_status == "FOUND":
-                user_profile = item_dict.get("content_json") or {}
+            if item.retrieval_status in ("FOUND", "COLLECTED"):
+                user_profile = item_dict.get("normalized_payload") or item_dict.get("content_json") or {}
             else:
                 user_profile = None
 
@@ -310,18 +310,38 @@ def node_validate_grounding(state: InvestigationState) -> Dict[str, Any]:
     )
 
     # Persist recommendation
+    from app.services.microservice_dispatcher import MicroserviceDispatcher
+    svc_status = MicroserviceDispatcher.get_all_connectors_status()
+    active_svcs = [f"{k} [{v['target_table']}]" for k, v in svc_status.items() if v.get("is_active")]
+    bypassed_svcs = [f"{k} [{v['target_table']}]" for k, v in svc_status.items() if not v.get("is_active")]
+
+    dumped = rec_schema.model_dump()
+    dumped["microservices_consulted"] = {
+        "active_sources": active_svcs,
+        "bypassed_sources": bypassed_svcs,
+    }
+
+    explanation_text = rec_schema.explanation
+    if active_svcs or bypassed_svcs:
+        source_summary = (
+            f"\n\n### 🌐 Microservice Data Sources Consulted:\n"
+            f"- **Active Data Sources**: {', '.join(active_svcs) if active_svcs else 'None'}\n"
+            f"- **Bypassed (Disabled by Admin)**: {', '.join(bypassed_svcs) if bypassed_svcs else 'None'}"
+        )
+        explanation_text += source_summary
+
     rec = Recommendation(
         id=str(uuid.uuid4()),
         case_id=state["case_id"],
         assessment=rec_schema.assessment,
         recommendation_type=rec_schema.recommendation,
-        explanation=rec_schema.explanation,
+        explanation=explanation_text[:2000],
         confidence_label=rec_schema.confidence_label,
         human_review_required=rec_schema.human_review_required,
         model_name=rec_schema.model_name,
         prompt_version="2.0",
         policy_version="1.0",
-        structured_result=rec_schema.model_dump()
+        structured_result=dumped
     )
     db.session.add(rec)
     db.session.commit()

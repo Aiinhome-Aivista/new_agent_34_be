@@ -515,6 +515,29 @@ def toggle_mock_connector(connector_id):
         "message": f"Switched {connector.service_name} to {'MOCK SIMULATOR' if connector.is_mock_enabled else 'LIVE NETWORK'} mode"
     }), 200
 
+@admin_bp.route("/connectors/<connector_id>/toggle-active", methods=["POST"])
+def toggle_active_connector(connector_id):
+    """Toggles microservice active status (True = active in pipeline, False = bypassed)."""
+    connector = MicroserviceApiRegistry.query.filter_by(id=connector_id).first()
+    if not connector:
+        return jsonify({"error": "Not Found", "message": f"Connector {connector_id} not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    if "is_active" in data:
+        connector.is_active = bool(data["is_active"])
+    else:
+        connector.is_active = not connector.is_active
+
+    db.session.commit()
+    logger.info(f"[MicroserviceRegistry] {connector.service_key} is_active set to {connector.is_active}")
+    return jsonify({
+        "id": connector.id,
+        "service_key": connector.service_key,
+        "service_name": connector.service_name,
+        "is_active": connector.is_active,
+        "message": f"Microservice {connector.service_name} is now {'ACTIVE' if connector.is_active else 'DISABLED'}"
+    }), 200
+
 @admin_bp.route("/connectors/<connector_id>/test", methods=["POST"])
 def test_connector(connector_id):
     """
