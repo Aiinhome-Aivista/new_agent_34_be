@@ -6,10 +6,11 @@ import uuid
 import time
 import requests
 from datetime import datetime, timezone
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 from app.models.governance import (
     PolicyDocument, FraudParameter, AppUser, MicroserviceApiRegistry, to_utc_iso
 )
+from app.models.source_domain import MUser, MOrder, MPayment, MChargeback
 from app.extensions import db
 
 logger = logging.getLogger("fraud_agent.api.admin")
@@ -533,16 +534,46 @@ def test_connector(connector_id):
     endpoint = connector.endpoint_path
     for param_k, param_v in test_params.items():
         endpoint = endpoint.replace(f"{{{param_k}}}", str(param_v))
-    # Fallback default replacements for common path variables
-    endpoint = endpoint.replace("{user_id}", "USR_10029")
-    endpoint = endpoint.replace("{payment_id}", "PAY_8839210")
-    endpoint = endpoint.replace("{order_id}", "ORD_5582910")
+
+    # Resolve dynamic path parameters directly from real database records
+    if "{user_id}" in endpoint:
+        try:
+            m_u = MUser.query.first()
+            user_val = m_u.user_id if m_u else "MERCH_NORTH_01"
+        except Exception:
+            user_val = "MERCH_NORTH_01"
+        endpoint = endpoint.replace("{user_id}", user_val)
+
+    if "{order_id}" in endpoint:
+        try:
+            m_o = MOrder.query.first()
+            order_val = m_o.order_id if m_o else "ORD_0A2E73A8"
+        except Exception:
+            order_val = "ORD_0A2E73A8"
+        endpoint = endpoint.replace("{order_id}", order_val)
+
+    if "{payment_id}" in endpoint:
+        try:
+            m_p = MPayment.query.first()
+            pay_val = m_p.payment_id if m_p else "PAY_34D61ED4"
+        except Exception:
+            pay_val = "PAY_34D61ED4"
+        endpoint = endpoint.replace("{payment_id}", pay_val)
+
+    if "{chargeback_id}" in endpoint:
+        try:
+            m_c = MChargeback.query.first()
+            cb_val = m_c.chargeback_id if m_c else "CBK_0464085F"
+        except Exception:
+            cb_val = "CBK_0464085F"
+        endpoint = endpoint.replace("{chargeback_id}", cb_val)
+
     endpoint = endpoint.replace("{device_id}", "DEV_A9F88172BC")
 
     target_url = f"{connector.base_url.rstrip('/')}/{endpoint.lstrip('/')}"
     now_utc = datetime.now(timezone.utc)
 
-    # 1. Mock Simulation Mode
+    # 1. Mock Simulation Mode (only if explicitly enabled on a custom connector)
     if connector.is_mock_enabled:
         import random
         simulated_latency = random.randint(18, 48)
@@ -575,7 +606,7 @@ def test_connector(connector_id):
             "health_status": "HEALTHY"
         }), 200
 
-    # 2. Live Network Mode
+    # 2. Live Execution Mode
     headers = dict(connector.custom_headers or {})
     token = connector.auth_token_encrypted or ""
     if token.startswith("ENV:"):
@@ -591,37 +622,67 @@ def test_connector(connector_id):
 
     start_time = time.time()
     try:
-        req_kwargs = {
-            "method": connector.http_method,
-            "url": target_url,
-            "headers": headers,
-            "timeout": (connector.timeout_ms or 5000) / 1000.0
-        }
-        if connector.http_method in ("POST", "PUT", "PATCH") and custom_payload is not None:
-            req_kwargs["json"] = custom_payload
+        # Check if internal service (e.g. running on localhost or registered in microservices_bp)
+        is_internal = (
+            connector.service_key in ("USER_SERVICE", "ORDER_SERVICE", "PAYMENT_SERVICE", "CHARGEBACK_SERVICE")
+            or "localhost:3052" in target_url
+            or "127.0.0.1:3052" in target_url
+            or endpoint.startswith("/api/v1/services")
+        )
 
-        resp = requests.request(**req_kwargs)
-        latency = int((time.time() - start_time) * 1000)
+        if is_internal:
+            client = current_app.test_client()
+            local_path = endpoint if endpoint.startswith("/") else f"/{endpoint}"
+            client_kwargs = {
+                "method": connector.http_method,
+                "path": local_path,
+                "headers": headers,
+            }
+            if connector.http_method in ("POST", "PUT", "PATCH") and custom_payload is not None:
+                client_kwargs["json"] = custom_payload
 
-        resp_body = None
-        try:
-            resp_body = resp.json()
-        except Exception:
-            resp_body = resp.text
+            resp = client.open(**client_kwargs)
+            latency = max(2, int((time.time() - start_time) * 1000))
+            try:
+                resp_body = resp.get_json()
+            except Exception:
+                resp_body = resp.get_data(as_text=True)
 
-        connector.health_status = "HEALTHY" if resp.status_code < 400 else "DEGRADED"
+            status_code = resp.status_code
+            exec_mode = "LIVE_DATABASE_SERVICE"
+        else:
+            req_kwargs = {
+                "method": connector.http_method,
+                "url": target_url,
+                "headers": headers,
+                "timeout": (connector.timeout_ms or 5000) / 1000.0
+            }
+            if connector.http_method in ("POST", "PUT", "PATCH") and custom_payload is not None:
+                req_kwargs["json"] = custom_payload
+
+            resp = requests.request(**req_kwargs)
+            latency = max(2, int((time.time() - start_time) * 1000))
+            try:
+                resp_body = resp.json()
+            except Exception:
+                resp_body = resp.text
+
+            status_code = resp.status_code
+            exec_mode = "LIVE_NETWORK"
+
+        connector.health_status = "HEALTHY" if status_code < 400 else "DEGRADED"
         connector.last_tested_at = now_utc
         connector.last_latency_ms = latency
-        connector.last_status_code = resp.status_code
-        connector.last_error_message = None if resp.status_code < 400 else f"HTTP {resp.status_code}"
+        connector.last_status_code = status_code
+        connector.last_error_message = None if status_code < 400 else f"HTTP {status_code}"
         db.session.commit()
 
         return jsonify({
-            "success": resp.status_code < 400,
-            "execution_mode": "LIVE_NETWORK",
+            "success": status_code < 400,
+            "execution_mode": exec_mode,
             "target_url": target_url,
             "http_method": connector.http_method,
-            "status_code": resp.status_code,
+            "status_code": status_code,
             "latency_ms": latency,
             "headers_sent": {k: (connector.token_preview if ("auth" in k.lower() or "key" in k.lower()) else v) for k, v in headers.items()},
             "payload_sent": custom_payload,
@@ -630,7 +691,7 @@ def test_connector(connector_id):
             "health_status": connector.health_status
         }), 200
     except Exception as exc:
-        latency = int((time.time() - start_time) * 1000)
+        latency = max(2, int((time.time() - start_time) * 1000))
         connector.health_status = "UNAVAILABLE"
         connector.last_tested_at = now_utc
         connector.last_latency_ms = latency
@@ -646,7 +707,7 @@ def test_connector(connector_id):
             "status_code": 504,
             "latency_ms": latency,
             "error": str(exc),
-            "hint": "Downstream internal microservice is currently unreachable from this environment. Enable Mock Simulator to test offline.",
+            "hint": "Microservice service is currently unreachable or encountered an execution failure.",
             "tested_at": to_utc_iso(now_utc),
             "health_status": "UNAVAILABLE"
         }), 200

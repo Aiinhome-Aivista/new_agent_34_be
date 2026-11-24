@@ -42,6 +42,7 @@ def create_app(config_class=Config):
     from app.api.ingestion import ingestion_bp
     from app.api.portal import portal_bp
     from app.api.notifications import notifications_bp
+    from app.api.microservices import microservices_bp
 
     app.register_blueprint(health_bp, url_prefix="/api/v1/health")
     app.register_blueprint(investigations_bp, url_prefix="/api/v1/investigations")
@@ -54,6 +55,7 @@ def create_app(config_class=Config):
     app.register_blueprint(ingestion_bp, url_prefix="/api/v1/ingest")
     app.register_blueprint(portal_bp, url_prefix="/api/v1/portal")
     app.register_blueprint(notifications_bp, url_prefix="/api/v1/notifications")
+    app.register_blueprint(microservices_bp, url_prefix="/api/v1/services")
 
     # Seamless redirect: if a customer clicks an evidence link on the backend port (e.g. :3052),
     # automatically 302 redirect them to the frontend port (:5173) so 404 never occurs!
@@ -67,14 +69,8 @@ def create_app(config_class=Config):
             target_url += f"?token={token}"
         return redirect(target_url, code=302)
 
-    # Ensure tables exist, seed data is populated, and poller is active
+    # Auto-seeder disabled: Database tables are initialized; microservices & configurations are managed directly in DB
     with app.app_context():
-        try:
-            from app.services.seed_data import seed_all_defaults
-            seed_all_defaults()
-        except Exception as seed_err:
-            logging.getLogger("fraud_agent.init").warning(f"Seed data initialization note: {seed_err}")
-
         # Phase 1: Knowledgebase schema migration (idempotent — safe to run on every startup)
         try:
             from app.services.knowledgebase.migrate_knowledgebase import migrate_knowledgebase_tables
