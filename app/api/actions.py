@@ -1,6 +1,7 @@
 from flask import Blueprint, jsonify, request
 from app.models.governance import ActionRequest, AuditEvent, IntegrationConfig, ReviewDecision
 from app.models.source_domain import MUser, MOrder, MPayment
+from app.services.microservice_client import MicroserviceClient
 from app.models.investigation import InvestigationCase, Recommendation
 from app.services.rag_service import PolicyRAGService
 from app.extensions import db
@@ -25,15 +26,15 @@ def list_actions():
         
         user_info = None
         if target_uid:
-            user = MUser.query.filter_by(user_id=target_uid).first()
+            user = MicroserviceClient.get_user(target_uid)
             if user:
                 user_info = {
-                    "user_id": user.user_id,
-                    "name": f"{user.first_name or ''} {user.last_name or ''}".strip() or user.user_id,
-                    "status": user.status, # Live current status in m_users ('BLOCKED', 'ACTIVE', etc.)
-                    "risk_level": user.risk_level,
-                    "kyc_status": user.kyc_status,
-                    "email": user.email
+                    "user_id": user.get("user_id", target_uid),
+                    "name": user.get("full_name") or f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or target_uid,
+                    "status": user.get("status"), # Live current status in m_users ('BLOCKED', 'ACTIVE', etc.)
+                    "risk_level": user.get("risk_level"),
+                    "kyc_status": user.get("kyc_status"),
+                    "email": user.get("email")
                 }
         d["user"] = user_info
         
@@ -93,26 +94,26 @@ def get_action_details(action_id):
     )
     user_data = None
     if target_uid:
-        user = MUser.query.filter_by(user_id=target_uid).first()
+        user = MicroserviceClient.get_user(target_uid)
         if user:
-            orders_cnt = MOrder.query.filter_by(user_id=user.user_id).count()
-            payments_cnt = MPayment.query.filter_by(user_id=user.user_id).count()
+            orders_cnt = MOrder.query.filter_by(user_id=user.get("user_id")).count()
+            payments_cnt = MPayment.query.filter_by(user_id=user.get("user_id")).count()
             user_data = {
-                "user_id": user.user_id,
-                "first_name": user.first_name,
-                "last_name": user.last_name,
-                "display_name": f"{user.first_name or ''} {user.last_name or ''}".strip() or user.user_id,
-                "email": user.email,
-                "phone": getattr(user, "phone_number", None) or getattr(user, "phone", None),
-                "phone_number": getattr(user, "phone_number", None) or getattr(user, "phone", None),
-                "status": user.status,  # LIVE status in m_users: 'BLOCKED' or 'ACTIVE'
-                "kyc_status": user.kyc_status,
-                "risk_level": user.risk_level,
-                "risk_score": float(user.risk_score) if user.risk_score else 0.0,
+                "user_id": user.get("user_id"),
+                "first_name": user.get("first_name"),
+                "last_name": user.get("last_name"),
+                "display_name": user.get("full_name") or f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or user.get("user_id"),
+                "email": user.get("email"),
+                "phone": user.get("phone_number") or user.get("phone"),
+                "phone_number": user.get("phone_number") or user.get("phone"),
+                "status": user.get("status"),  # LIVE status in m_users: 'BLOCKED' or 'ACTIVE'
+                "kyc_status": user.get("kyc_status"),
+                "risk_level": user.get("risk_level"),
+                "risk_score": float(user.get("risk_score") or 0.0),
                 "orders_count": orders_cnt,
                 "payments_count": payments_cnt,
-                "created_at": user.created_at.isoformat() if user.created_at else None,
-                "updated_at": user.updated_at.isoformat() if user.updated_at else None
+                "created_at": user.get("created_at"),
+                "updated_at": user.get("updated_at")
             }
     act_dict["user_profile"] = user_data
     

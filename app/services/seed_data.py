@@ -256,7 +256,7 @@ DEFAULT_MICROSERVICES = [
         "service_category": "IDENTITY",
         "description": "Retrieves comprehensive customer KYC tier, verification documents, identity risk score, and linked accounts across banking verticals.",
         "http_method": "GET",
-        "base_url": "https://api.internal.bank.com/user-service",
+        "base_url": "http://127.0.0.1:5000",
         "endpoint_path": "/api/v1/users/{user_id}",
         "auth_type": "BEARER_TOKEN",
         "auth_header_key": "Authorization",
@@ -293,7 +293,7 @@ DEFAULT_MICROSERVICES = [
         "service_category": "PAYMENT",
         "description": "Fetches card processor response codes, 3D-Secure authentication state, card BIN details, routing hop, and settlement logs.",
         "http_method": "GET",
-        "base_url": "https://payments.gateway.internal",
+        "base_url": "http://127.0.0.1:5000",
         "endpoint_path": "/api/v1/payments/{payment_id}",
         "auth_type": "API_KEY",
         "auth_header_key": "X-Gateway-API-Key",
@@ -367,7 +367,7 @@ DEFAULT_MICROSERVICES = [
         "service_category": "ORDER",
         "description": "Fetches order items, digital goods vs physical shipping address, consignment status, and delivery milestones.",
         "http_method": "GET",
-        "base_url": "https://orders.commerce.internal",
+        "base_url": "http://127.0.0.1:5000",
         "endpoint_path": "/api/v1/orders/{order_id}",
         "auth_type": "BEARER_TOKEN",
         "auth_token_encrypted": "ord_auth_jwt_991823746519",
@@ -443,7 +443,7 @@ DEFAULT_MICROSERVICES = [
         "service_category": "DISPUTE",
         "description": "Provides historical dispute cases, friendly fraud flags, pre-arbitration warnings, and merchant chargeback ratios.",
         "http_method": "GET",
-        "base_url": "https://disputes.ledger.internal",
+        "base_url": "http://127.0.0.1:5000",
         "endpoint_path": "/api/v1/disputes/summary/{user_id}",
         "auth_type": "BEARER_TOKEN",
         "auth_token_encrypted": "dsp_ledger_sec_2984710293",
@@ -477,7 +477,7 @@ DEFAULT_MICROSERVICES = [
         "service_category": "ACTION",
         "description": "Dispatches real-time protective enforcement: lock user, cancel pending payments, freeze payouts, or force OTP.",
         "http_method": "PUT",
-        "base_url": "https://enforcement.core.internal",
+        "base_url": "http://127.0.0.1:5000",
         "endpoint_path": "/api/v1/accounts/{user_id}/status",
         "auth_type": "BEARER_TOKEN",
         "auth_token_encrypted": "enf_auth_token_secret_8819",
@@ -687,6 +687,11 @@ def seed_all_defaults():
             )
             db.session.add(new_conn)
             seeded_connectors += 1
+        else:
+            # Sync base_url and endpoint_path if they were pointing to legacy or unresolvable internal domains
+            if "internal" in (existing_conn.base_url or ""):
+                existing_conn.base_url = conn_def["base_url"]
+                existing_conn.endpoint_path = conn_def["endpoint_path"]
 
     db.session.commit()
     logger.info(f"Database seed completed: {seeded_users} users, {seeded_policies} policies, {seeded_params} parameters, {seeded_connectors} connectors.")

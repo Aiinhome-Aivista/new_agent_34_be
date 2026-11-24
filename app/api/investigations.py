@@ -1,6 +1,7 @@
 from app.models.investigation import CaseEvidence
 from app.models.governance import AppUser, AppNotification
 from app.models.source_domain import MUser
+from app.services.microservice_client import MicroserviceClient
 import os
 import uuid
 import time
@@ -53,10 +54,10 @@ def create_investigation():
         is_user_already_blocked = False
         target_user_display = trigger_req.user_id
         if trigger_req.user_id:
-            m_user = MUser.query.filter_by(user_id=trigger_req.user_id).first()
-            if m_user and m_user.status == "BLOCKED":
+            m_user = MicroserviceClient.get_user(trigger_req.user_id)
+            if m_user and m_user.get("status") == "BLOCKED":
                 is_user_already_blocked = True
-                target_user_display = m_user.name or trigger_req.user_id
+                target_user_display = m_user.get("full_name") or m_user.get("name") or trigger_req.user_id
 
         if is_user_already_blocked:
             # Fast-Path Enforcement: Immediate Gateway Hard Reject without LLM delay
@@ -295,16 +296,16 @@ def submit_decision(case_id):
         target_user_record = None
         if case.user_id_ref:
             try:
-                target_user_record = MUser.query.filter_by(user_id=case.user_id_ref).first()
+                target_user_record = MicroserviceClient.get_user(case.user_id_ref)
             except Exception:
                 pass
 
         target_name = (
-            f"{getattr(target_user_record, 'first_name', '') or ''} {getattr(target_user_record, 'last_name', '') or ''}".strip()
+            target_user_record.get("full_name") or f"{target_user_record.get('first_name', '')} {target_user_record.get('last_name', '')}".strip()
             if target_user_record else "Unknown Customer"
         ) or "Unknown Customer"
-        target_email = getattr(target_user_record, "email", None) if target_user_record else None
-        risk_score = getattr(target_user_record, "risk_score", 0.85) if target_user_record else 0.85
+        target_email = target_user_record.get("email") if target_user_record else None
+        risk_score = target_user_record.get("risk_score", 0.85) if target_user_record else 0.85
 
         # 2. Persist In-App Notification for Senior & Admin personas
         notif = AppNotification(

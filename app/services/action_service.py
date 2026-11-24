@@ -1,4 +1,5 @@
 from app.models.source_domain import MUser
+from app.services.microservice_client import MicroserviceClient
 import uuid
 import logging
 from datetime import datetime, timezone
@@ -86,17 +87,25 @@ class ActionService:
                 target_user = MUser.query.filter_by(user_id=target_user_id).first()
 
             if action_type in ["LOCK_USER", "BLOCK_USER"]:
-                if target_user:
-                    target_user.status = "BLOCKED"
-                    target_user.updated_at = datetime.now(timezone.utc)
-                    logger.info(f"MUser {target_user_id} status updated to BLOCKED")
+                if target_user_id:
+                    MicroserviceClient.enforce_account_status(
+                        user_id=target_user_id,
+                        status="BLOCKED",
+                        reason=f"Action {action_type} executed by {requested_by}",
+                        idempotency_key=idempotency_key
+                    )
+                    logger.info(f"MUser {target_user_id} status enforced to BLOCKED via MicroserviceClient")
                 case.status = "ACTION_AUTHORIZED"
 
             elif action_type == "UNLOCK_USER":
-                if target_user:
-                    target_user.status = "ACTIVE"
-                    target_user.updated_at = datetime.now(timezone.utc)
-                    logger.info(f"MUser {target_user_id} status updated to ACTIVE")
+                if target_user_id:
+                    MicroserviceClient.enforce_account_status(
+                        user_id=target_user_id,
+                        status="ACTIVE",
+                        reason=f"Action UNLOCK_USER executed by {requested_by}",
+                        idempotency_key=idempotency_key
+                    )
+                    logger.info(f"MUser {target_user_id} status enforced to ACTIVE via MicroserviceClient")
                 case.status = "RESOLVED"
 
             elif action_type == "REQUEST_EVIDENCE":
