@@ -167,13 +167,23 @@ def node_execute_fraud_rules(state: InvestigationState) -> Dict[str, Any]:
     """
     logger.info(f"[Node:execute_fraud_rules] case={state['case_id']}")
 
-    # Build evidence context dict for rule evaluators
+    # Build evidence context dict for rule evaluators (fall back to evidence_items if _user_profile is unset)
+    evidence_items = state.get("evidence_items", [])
+    user_profile = state.get("_user_profile")
+    if user_profile is None:
+        for item in evidence_items:
+            if item.get("evidence_type") == "USER_PROFILE" and item.get("retrieval_status") in ("FOUND", "COLLECTED"):
+                payload = item.get("normalized_payload") or item.get("content_json") or {}
+                if isinstance(payload, dict) and payload.get("status") != "MISSING":
+                    user_profile = payload
+                    break
+
     evidence_ctx = {
         "user_id": state.get("user_id"),
         "merchant_id": state.get("merchant_id"),
         "device_id": state.get("_device_id"),
-        "user_profile": state.get("_user_profile"),
-        "evidence_items": state.get("evidence_items", []),
+        "user_profile": user_profile,
+        "evidence_items": evidence_items,
     }
 
     rule_results = FraudRuleEngine.evaluate(evidence_ctx)
