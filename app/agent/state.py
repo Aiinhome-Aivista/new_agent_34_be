@@ -25,6 +25,7 @@ class InvestigationState(TypedDict):
     # ----------------------------------------------------------------
     evidence_items: List[Dict[str, Any]]
     missing_evidence: List[str]
+    _user_profile: Optional[Dict[str, Any]]
 
     # ----------------------------------------------------------------
     # Parallel Knowledgebase Intelligence (Phase 3 nodes)

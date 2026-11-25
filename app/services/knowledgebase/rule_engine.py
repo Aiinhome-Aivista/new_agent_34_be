@@ -54,10 +54,18 @@ class RuleEvaluators:
     def eval_user_identity_exists(rule: FraudRule, evidence: Dict[str, Any]) -> Dict[str, Any]:
         """
         FR-001: Check if the user_id exists in m_users.
-        Evidence key: 'user_profile' → the found User ORM object dict, or None.
+        Evidence key: 'user_profile' → the found User ORM object dict, or fallback to evidence_items.
         """
         user_profile = evidence.get("user_profile")
         user_id = evidence.get("user_id")
+
+        if user_profile is None:
+            for item in evidence.get("evidence_items", []):
+                if item.get("evidence_type") == "USER_PROFILE" and item.get("retrieval_status") in ("FOUND", "COLLECTED"):
+                    payload = item.get("normalized_payload") or item.get("content_json") or {}
+                    if isinstance(payload, dict) and payload.get("status") != "MISSING":
+                        user_profile = payload
+                        break
 
         if user_profile is None or (isinstance(user_profile, dict) and user_profile.get("status") == "MISSING"):
             return _rule_result(rule, triggered=True, observed_value=0,
