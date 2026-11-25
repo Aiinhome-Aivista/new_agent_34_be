@@ -10,7 +10,7 @@ from flask import Blueprint, request, jsonify, current_app
 from app.models.governance import (
     PolicyDocument, FraudParameter, AppUser, MicroserviceApiRegistry, to_utc_iso
 )
-from app.models.source_domain import MUser, MOrder, MPayment, MChargeback
+from app.models.source_domain import MUser, MOrder, MPayment, MChargeback, MRefund
 from app.extensions import db
 
 logger = logging.getLogger("fraud_agent.api.admin")
@@ -591,6 +591,14 @@ def test_connector(connector_id):
             cb_val = "CBK_0464085F"
         endpoint = endpoint.replace("{chargeback_id}", cb_val)
 
+    if "{refund_id}" in endpoint:
+        try:
+            m_r = MRefund.query.first()
+            ref_val = m_r.refund_id if m_r else "REF_1001"
+        except Exception:
+            ref_val = "REF_1001"
+        endpoint = endpoint.replace("{refund_id}", ref_val)
+
     endpoint = endpoint.replace("{device_id}", "DEV_A9F88172BC")
 
     target_url = f"{connector.base_url.rstrip('/')}/{endpoint.lstrip('/')}"
@@ -647,7 +655,7 @@ def test_connector(connector_id):
     try:
         # Check if internal service (e.g. running on localhost or registered in microservices_bp)
         is_internal = (
-            connector.service_key in ("USER_SERVICE", "ORDER_SERVICE", "PAYMENT_SERVICE", "CHARGEBACK_SERVICE")
+            connector.service_key in ("USER_SERVICE", "ORDER_SERVICE", "PAYMENT_SERVICE", "CHARGEBACK_SERVICE", "REFUND_SERVICE")
             or "localhost:3052" in target_url
             or "127.0.0.1:3052" in target_url
             or endpoint.startswith("/api/v1/services")

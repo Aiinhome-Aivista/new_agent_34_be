@@ -16,7 +16,7 @@ from typing import Dict, Any, List, Optional, Tuple
 
 from app.extensions import db
 from app.models.governance import MicroserviceApiRegistry
-from app.models.source_domain import MUser, MOrder, MPayment, MChargeback
+from app.models.source_domain import MUser, MOrder, MPayment, MChargeback, MRefund
 from app.models.investigation import CaseEvidence
 
 logger = logging.getLogger("fraud_agent.microservice_dispatcher")
@@ -61,7 +61,9 @@ class MicroserviceDispatcher:
                 target_table = "m_users" if c.service_key == "USER_SERVICE" else (
                     "m_orders" if c.service_key == "ORDER_SERVICE" else (
                         "m_payments" if c.service_key == "PAYMENT_SERVICE" else (
-                            "m_chargebacks" if c.service_key == "CHARGEBACK_SERVICE" else "external_api"
+                            "m_chargebacks" if c.service_key == "CHARGEBACK_SERVICE" else (
+                                "m_refunds" if c.service_key == "REFUND_SERVICE" else "external_api"
+                            )
                         )
                     )
                 )
@@ -111,7 +113,7 @@ class MicroserviceDispatcher:
 
         # Map connectors by key for fast lookup
         connector_map = {c.service_key: c for c in connectors}
-        standard_keys = list(connector_map.keys()) if connector_map else ["USER_SERVICE", "ORDER_SERVICE", "PAYMENT_SERVICE", "CHARGEBACK_SERVICE"]
+        standard_keys = list(connector_map.keys()) if connector_map else ["USER_SERVICE", "ORDER_SERVICE", "PAYMENT_SERVICE", "CHARGEBACK_SERVICE", "REFUND_SERVICE"]
 
         with db.session.no_autoflush:
             for s_key in standard_keys:
@@ -121,7 +123,9 @@ class MicroserviceDispatcher:
                 target_table = "m_users" if s_key == "USER_SERVICE" else (
                     "m_orders" if s_key == "ORDER_SERVICE" else (
                         "m_payments" if s_key == "PAYMENT_SERVICE" else (
-                            "m_chargebacks" if s_key == "CHARGEBACK_SERVICE" else "external_api"
+                            "m_chargebacks" if s_key == "CHARGEBACK_SERVICE" else (
+                                "m_refunds" if s_key == "REFUND_SERVICE" else "external_api"
+                            )
                         )
                     )
                 )
@@ -271,7 +275,35 @@ class MicroserviceDispatcher:
                                 )
                                 evidence_items.append(evidence)
 
-                    # 5. FUTURE / THIRD-PARTY DYNAMIC MICROSERVICE
+                    # 5. REFUND_SERVICE (m_refunds)
+                    elif s_key == "REFUND_SERVICE":
+                        refunds = []
+                        if user_id:
+                            refunds = MRefund.query.filter_by(user_id=user_id).order_by(MRefund.requested_at.desc()).limit(10).all()
+                        elif transaction_id:
+                            refunds = MRefund.query.filter_by(payment_id=transaction_id).limit(10).all()
+                        elif order_id:
+                            refunds = MRefund.query.filter_by(order_id=order_id).limit(10).all()
+
+                        if refunds:
+                            data_found = True
+                            rec_count = len(refunds)
+                            for r in refunds:
+                                r_payload = r.to_dict()
+                                evidence = CaseEvidence(
+                                    id=str(uuid.uuid4()),
+                                    case_id=case_id,
+                                    evidence_type="REFUND_HISTORY",
+                                    source_system=f"REFUND_SERVICE [{target_table}]",
+                                    source_reference=r.refund_id,
+                                    retrieval_status="COLLECTED",
+                                    retrieved_at=now,
+                                    normalized_payload=r_payload,
+                                    content_hash=hashlib.sha256(json.dumps(r_payload, sort_keys=True).encode()).hexdigest()
+                                )
+                                evidence_items.append(evidence)
+
+                    # 6. FUTURE / THIRD-PARTY DYNAMIC MICROSERVICE
                     else:
                         data_found = True
                         rec_count = 1

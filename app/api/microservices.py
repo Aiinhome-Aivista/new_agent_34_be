@@ -1,6 +1,6 @@
 import logging
 from flask import Blueprint, request, jsonify
-from app.models.source_domain import MUser, MOrder, MPayment, MChargeback
+from app.models.source_domain import MUser, MOrder, MPayment, MChargeback, MRefund
 
 logger = logging.getLogger("fraud_agent.api.microservices")
 microservices_bp = Blueprint("microservices", __name__)
@@ -188,4 +188,53 @@ def get_chargeback_service(chargeback_id=None):
         "service": "CHARGEBACK_SERVICE",
         "source_table": "m_chargebacks",
         "chargeback": chargeback.to_dict()
+    }), 200
+
+
+# ============================================================================
+# 5. Refund & Return Microservice API (m_refunds)
+# ============================================================================
+
+@microservices_bp.route("/refunds/<refund_id>", methods=["GET"])
+@microservices_bp.route("/refunds", methods=["GET"])
+def get_refund_service(refund_id=None):
+    """
+    Microservice endpoint for User Refund & Return Ledger data.
+    Fetches live record directly from m_refunds table.
+    """
+    target_id = refund_id or request.args.get("refund_id")
+    user_id = request.args.get("user_id")
+    payment_id = request.args.get("payment_id")
+    order_id = request.args.get("order_id")
+
+    if not target_id:
+        query = MRefund.query
+        if user_id:
+            query = query.filter_by(user_id=user_id)
+        if payment_id:
+            query = query.filter_by(payment_id=payment_id)
+        if order_id:
+            query = query.filter_by(order_id=order_id)
+        limit = min(int(request.args.get("limit", 10)), 50)
+        refunds = query.order_by(MRefund.requested_at.desc()).limit(limit).all()
+        return jsonify({
+            "service": "REFUND_SERVICE",
+            "source_table": "m_refunds",
+            "count": len(refunds),
+            "refunds": [r.to_dict() for r in refunds]
+        }), 200
+
+    refund = MRefund.query.filter_by(refund_id=target_id).first()
+    if not refund:
+        return jsonify({
+            "error": "Not Found",
+            "message": f"Refund '{target_id}' not found in m_refunds directory",
+            "service": "REFUND_SERVICE",
+            "source_table": "m_refunds"
+        }), 404
+
+    return jsonify({
+        "service": "REFUND_SERVICE",
+        "source_table": "m_refunds",
+        "refund": refund.to_dict()
     }), 200

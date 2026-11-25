@@ -1,4 +1,4 @@
-from app.models.source_domain import User, Order, Payment, Chargeback
+from app.models.source_domain import User, Order, Payment, Chargeback, Refund, MRefund
 from app.models.investigation import (
     InvestigationCase, CaseEvidence, InvestigationRun,
     Recommendation, RecommendationEvidence, EvidenceRequestToken

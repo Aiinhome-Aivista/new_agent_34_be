@@ -11,7 +11,7 @@ from typing import Dict, Any, List, Optional
 
 from app.extensions import db
 from app.config import Config
-from app.models.source_domain import MUser, MOrder, MPayment, MChargeback
+from app.models.source_domain import MUser, MOrder, MPayment, MChargeback, MRefund
 from app.models.investigation import Recommendation, CaseEvidence
 from app.schemas.trigger import TriggerRequest
 from app.services.case_service import CaseService
@@ -300,9 +300,14 @@ class IngestService:
                 if MicroserviceDispatcher.is_service_active("CHARGEBACK_SERVICE") and payment_ids:
                     linked_chargebacks = MChargeback.query.filter(MChargeback.payment_id.in_(payment_ids)).all()
 
+                linked_refunds = []
+                if MicroserviceDispatcher.is_service_active("REFUND_SERVICE"):
+                    linked_refunds = MRefund.query.filter_by(user_id=user.user_id).order_by(MRefund.requested_at.desc()).all()
+
                 orders_count = len(linked_orders)
                 payments_count = len(linked_payments)
                 chargebacks_count = len(linked_chargebacks)
+                refunds_count = len(linked_refunds)
                 target_tx_id = linked_payments[0].payment_id if linked_payments else None
                 target_merch_id = linked_payments[0].merchant_id if linked_payments else None
                 ingested_count += 1
@@ -339,6 +344,11 @@ class IngestService:
                     profile_elements.append(f"{chargebacks_count} disputes")
                 else:
                     profile_elements.append("[disputes: bypassed]")
+
+                if MicroserviceDispatcher.is_service_active("REFUND_SERVICE"):
+                    profile_elements.append(f"{refunds_count} refunds")
+                else:
+                    profile_elements.append("[refunds: bypassed]")
 
                 user_display = f"{user.first_name or ''} {user.last_name or ''}".strip() or user.user_id
                 enriched_reason = (

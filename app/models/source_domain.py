@@ -214,8 +214,59 @@ class MChargeback(db.Model):
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
+class MRefund(db.Model):
+    """Master Refunds table (m_refunds)."""
+    __tablename__ = "m_refunds"
+
+    refund_id = Column(String(36), primary_key=True)
+    payment_id = Column(String(36), ForeignKey("m_payments.payment_id"), nullable=True)
+    order_id = Column(String(36), ForeignKey("m_orders.order_id"), nullable=True)
+    user_id = Column(String(36), ForeignKey("m_users.user_id"), nullable=False)
+    merchant_id = Column(String(36), nullable=True)
+    refund_amount = Column(DECIMAL(18, 2), nullable=False)
+    currency = Column(CHAR(3), nullable=False, default="INR")
+    refund_reason = Column(String(500), nullable=True)
+    refund_status = Column(String(30), nullable=False, default="REQUESTED")  # 'REQUESTED', 'PROCESSING', 'COMPLETED', 'REJECTED', 'FAILED'
+    refund_method = Column(String(50), nullable=False, default="ORIGINAL_SOURCE")  # 'ORIGINAL_SOURCE', 'WALLET', 'BANK_TRANSFER'
+    initiated_by = Column(String(40), nullable=False, default="USER")  # 'USER', 'MERCHANT', 'SYSTEM'
+    requested_at = Column(TIMESTAMP, default=utc_now, nullable=False)
+    processed_at = Column(TIMESTAMP, nullable=True)
+    created_at = Column(TIMESTAMP, default=utc_now, nullable=False)
+    updated_at = Column(TIMESTAMP, default=utc_now, onupdate=utc_now, nullable=False)
+
+    user = relationship("MUser", foreign_keys=[user_id])
+    payment = relationship("MPayment", foreign_keys=[payment_id])
+    order = relationship("MOrder", foreign_keys=[order_id])
+
+    __table_args__ = (
+        Index("idx_m_refunds_user", "user_id"),
+        Index("idx_m_refunds_payment", "payment_id"),
+        Index("idx_m_refunds_order", "order_id"),
+        Index("idx_m_refunds_status", "refund_status", "requested_at"),
+    )
+
+    def to_dict(self):
+        return {
+            "refund_id": self.refund_id,
+            "payment_id": self.payment_id,
+            "order_id": self.order_id,
+            "user_id": self.user_id,
+            "merchant_id": self.merchant_id,
+            "refund_amount": float(self.refund_amount),
+            "currency": self.currency,
+            "refund_reason": self.refund_reason,
+            "refund_status": self.refund_status,
+            "refund_method": self.refund_method,
+            "initiated_by": self.initiated_by,
+            "requested_at": self.requested_at.isoformat() if self.requested_at else None,
+            "processed_at": self.processed_at.isoformat() if self.processed_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
 # Aliases for 100% backward compatibility
 User = MUser
 Order = MOrder
 Payment = MPayment
 Chargeback = MChargeback
+Refund = MRefund
