@@ -19,6 +19,7 @@ class InvestigationState(TypedDict):
     transaction_id: Optional[str]
     user_id: Optional[str]
     merchant_id: Optional[str]
+    order_id: Optional[str]
 
     # ----------------------------------------------------------------
     # Core MySQL Evidence (node_collect_evidence)
@@ -26,6 +27,8 @@ class InvestigationState(TypedDict):
     evidence_items: List[Dict[str, Any]]
     missing_evidence: List[str]
     _user_profile: Optional[Dict[str, Any]]
+    _device_id: Optional[str]
+    prefetched_snapshot: Optional[Dict[str, Any]]
 
     # ----------------------------------------------------------------
     # Parallel Knowledgebase Intelligence (Phase 3 nodes)

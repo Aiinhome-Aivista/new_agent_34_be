@@ -284,32 +284,27 @@ class IngestService:
                     }
                     continue
 
-                # 2. Existing User: Fetch linked data dynamically from active microservices
+                # 2. Existing User: Fetch linked data IN PARALLEL across all active microservices
                 from app.services.microservice_dispatcher import MicroserviceDispatcher
 
-                linked_orders = []
-                if MicroserviceDispatcher.is_service_active("ORDER_SERVICE"):
-                    linked_orders = MOrder.query.filter_by(user_id=user.user_id).order_by(MOrder.created_at.desc()).all()
+                snapshot = MicroserviceDispatcher.fetch_domain_snapshot_parallel(
+                    user_id=user.user_id,
+                    case_label=f"Batch User: {user.user_id}",
+                )
+                records_by_service = snapshot.get("records_by_service", {})
+                service_active = snapshot.get("service_active", {})
 
-                linked_payments = []
-                if MicroserviceDispatcher.is_service_active("PAYMENT_SERVICE"):
-                    linked_payments = MPayment.query.filter_by(user_id=user.user_id).order_by(MPayment.initiated_at.desc()).all()
-
-                payment_ids = [p.payment_id for p in linked_payments]
-                linked_chargebacks = []
-                if MicroserviceDispatcher.is_service_active("CHARGEBACK_SERVICE") and payment_ids:
-                    linked_chargebacks = MChargeback.query.filter(MChargeback.payment_id.in_(payment_ids)).all()
-
-                linked_refunds = []
-                if MicroserviceDispatcher.is_service_active("REFUND_SERVICE"):
-                    linked_refunds = MRefund.query.filter_by(user_id=user.user_id).order_by(MRefund.requested_at.desc()).all()
+                linked_orders = records_by_service.get("ORDER_SERVICE", [])
+                linked_payments = records_by_service.get("PAYMENT_SERVICE", [])
+                linked_chargebacks = records_by_service.get("CHARGEBACK_SERVICE", [])
+                linked_refunds = records_by_service.get("REFUND_SERVICE", [])
 
                 orders_count = len(linked_orders)
                 payments_count = len(linked_payments)
                 chargebacks_count = len(linked_chargebacks)
                 refunds_count = len(linked_refunds)
-                target_tx_id = linked_payments[0].payment_id if linked_payments else None
-                target_merch_id = linked_payments[0].merchant_id if linked_payments else None
+                target_tx_id = linked_payments[0].get("payment_id") if linked_payments else None
+                target_merch_id = linked_payments[0].get("merchant_id") if linked_payments else None
                 ingested_count += 1
 
                 # 3. Compute Dynamic Priority based on active master domain state & policy signals
@@ -330,22 +325,22 @@ class IngestService:
                     base_reason = f"[REPEAT OFFENDER ALERT] Target user is CURRENTLY BLOCKED due to previous enforcement. | {base_reason}"
 
                 profile_elements = []
-                if MicroserviceDispatcher.is_service_active("ORDER_SERVICE"):
+                if service_active.get("ORDER_SERVICE", False):
                     profile_elements.append(f"{orders_count} orders")
                 else:
                     profile_elements.append("[orders: bypassed]")
 
-                if MicroserviceDispatcher.is_service_active("PAYMENT_SERVICE"):
+                if service_active.get("PAYMENT_SERVICE", False):
                     profile_elements.append(f"{payments_count} payments")
                 else:
                     profile_elements.append("[payments: bypassed]")
 
-                if MicroserviceDispatcher.is_service_active("CHARGEBACK_SERVICE"):
+                if service_active.get("CHARGEBACK_SERVICE", False):
                     profile_elements.append(f"{chargebacks_count} disputes")
                 else:
                     profile_elements.append("[disputes: bypassed]")
 
-                if MicroserviceDispatcher.is_service_active("REFUND_SERVICE"):
+                if service_active.get("REFUND_SERVICE", False):
                     profile_elements.append(f"{refunds_count} refunds")
                 else:
                     profile_elements.append("[refunds: bypassed]")
@@ -368,18 +363,18 @@ class IngestService:
                     for o in linked_orders:
                         GraphStoreService.process_order_ingestion({
                             "user_id": user.user_id,
-                            "order_id": o.order_id,
-                            "device_id": getattr(o, "device_id", None),
-                            "ip_address": getattr(o, "ip_address", None),
-                            "merchant_id": getattr(o, "merchant_id", None),
+                            "order_id": o.get("order_id"),
+                            "device_id": o.get("device_id"),
+                            "ip_address": o.get("ip_address"),
+                            "merchant_id": o.get("merchant_id"),
                         })
                     for p in linked_payments:
                         GraphStoreService.process_payment_ingestion({
                             "user_id": user.user_id,
-                            "payment_id": p.payment_id,
-                            "device_id": getattr(p, "device_id", None),
-                            "ip_address": getattr(p, "ip_address", None),
-                            "payment_method": getattr(p, "payment_method", None),
+                            "payment_id": p.get("payment_id"),
+                            "device_id": p.get("device_id"),
+                            "ip_address": p.get("ip_address"),
+                            "payment_method": p.get("payment_method"),
                         })
                 except Exception as graph_hook_err:
                     logger.warning(f"GraphStore ingestion hook note: {graph_hook_err}")
@@ -430,7 +425,7 @@ class IngestService:
                         db.session.commit()
                     elif not is_dup:
                         try:
-                            execute_case_investigation(case.id)
+                            execute_case_investigation(case.id, prefetched_snapshot=snapshot)
                         except Exception as inv_err:
                             logger.error(f"Error executing case investigation {case.id}: {inv_err}")
 

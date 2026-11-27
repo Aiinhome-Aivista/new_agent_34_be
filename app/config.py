@@ -120,3 +120,8 @@ class Config:
     # ── Frontend Base URL (For Customer Portal Links) ────────────────────────
     FRONTEND_BASE_URL: str = os.getenv("FRONTEND_BASE_URL", "http://localhost:5173")
 
+    # ── Parallel Microservice Dispatch Settings ──────────────────────────────
+    MICROSERVICE_MAX_WORKERS: int = int(os.getenv("MICROSERVICE_MAX_WORKERS", "8"))
+    MICROSERVICE_BARRIER_TIMEOUT_SECONDS: float = float(os.getenv("MICROSERVICE_BARRIER_TIMEOUT_SECONDS", "15.0"))
+    MICROSERVICE_FORCE_NETWORK_HTTP: bool = os.getenv("MICROSERVICE_FORCE_NETWORK_HTTP", "false").lower() == "true"
+

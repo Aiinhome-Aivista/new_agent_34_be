@@ -76,12 +76,18 @@ def node_collect_evidence(state: InvestigationState) -> Dict[str, Any]:
     Builds a flat evidence_items list consumed by all parallel retrieval nodes.
     """
     logger.info(f"[Node:collect_evidence] case={state['case_id']}")
-    collected_models = EvidenceService.collect_evidence_for_case(
-        case_id=state["case_id"],
-        transaction_id=state.get("transaction_id"),
-        user_id=state.get("user_id"),
-        merchant_id=state.get("merchant_id")
-    )
+    collect_kwargs: Dict[str, Any] = {
+        "case_id": state["case_id"],
+        "transaction_id": state.get("transaction_id"),
+        "user_id": state.get("user_id"),
+        "merchant_id": state.get("merchant_id"),
+    }
+    if state.get("order_id") is not None:
+        collect_kwargs["order_id"] = state.get("order_id")
+    if state.get("prefetched_snapshot") is not None:
+        collect_kwargs["prefetched_snapshot"] = state.get("prefetched_snapshot")
+
+    collected_models = EvidenceService.collect_evidence_for_case(**collect_kwargs)
 
     items = []
     missing = []
@@ -478,7 +484,11 @@ investigation_graph = build_investigation_graph()
 # Public execution helper
 # =============================================================================
 
-def execute_case_investigation(case_id: str) -> Dict[str, Any]:
+def execute_case_investigation(
+    case_id: str,
+    prefetched_snapshot: Dict[str, Any] | None = None,
+    order_id: str | None = None,
+) -> Dict[str, Any]:
     """
     Runs the compiled investigation graph synchronously.
     Can be called directly or dispatched via Celery.
@@ -495,9 +505,11 @@ def execute_case_investigation(case_id: str) -> Dict[str, Any]:
         "transaction_id": case.transaction_id,
         "user_id": case.user_id_ref,
         "merchant_id": case.merchant_id_ref,
+        "order_id": order_id,
         # Evidence
         "evidence_items": [],
         "missing_evidence": [],
+        "prefetched_snapshot": prefetched_snapshot,
         # Knowledgebase intelligence (populated by parallel nodes)
         "graph_analysis": {},
         "rule_evaluation_results": {},
